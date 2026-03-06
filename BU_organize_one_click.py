@@ -225,9 +225,11 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
     records = []
     for idx, src in enumerate(image_files, start=1):
         rel = src.relative_to(input_root)
-        dst = output_root / rel
+        dst_raw = output_root / rel
+        dst = dst_raw
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst = unique_file_path(dst)
+        renamed = dst != dst_raw
 
         lot_id, kind = parse_lot_kind(src.stem)
 
@@ -255,6 +257,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
                     "dst": dst,
                     "bbox": used_bbox,
                     "status": status,
+                    "renamed_on_save": "TRUE" if renamed else "FALSE",
                 }
             )
         except Exception as exc:
@@ -266,6 +269,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
                     "dst": None,
                     "bbox": None,
                     "status": f"ERROR: {exc}",
+                    "renamed_on_save": "FALSE",
                 }
             )
 
@@ -275,49 +279,118 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
     return records
 
 
-def write_excel(records, excel_path: Path, image_width_px: int = 240):
-    # 크롭 결과를 엑셀에 정리하고 미리보기 이미지를 삽입
-    # image_width_px 값을 키우면 엑셀 미리보기 이미지가 더 크게 보인다.
+def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int = 240):
+    # 결과 시트: LotID별 BU/WU 이미지 배치 (사용자 입력 컬럼은 공란 유지)
+    # 상세 시트: 경로/중복 정보 정리 (이미지 없음)
     wb = Workbook()
     ws = wb.active
-    ws.title = "cropped_images"
-    ws.append(["LotID", "Kind", "Status", "CropBBox", "SourcePath", "CroppedPath", "Preview"])
+    ws.title = "결과"
+    ws.append(["LotID", "판정", "BU data", "BU Image", "WU data", "WU Image"])
 
     total = len(records)
     print(f"\n[5/5] 엑셀 작성 시작 (행: {total}개)")
 
+    grouped: dict[str, dict[str, Path | None]] = {}
+    for rec in records:
+        lot_id = rec["lot_id"]
+        kind = rec["kind"]
+        grouped.setdefault(lot_id, {"BU": None, "WU": None})
+        if kind in ("BU", "WU") and rec["dst"] is not None and grouped[lot_id][kind] is None:
+            grouped[lot_id][kind] = rec["dst"]
+
     row = 2
+    for lot_id in sorted(grouped.keys()):
+        ws.cell(row=row, column=1, value=lot_id)
+        ws.cell(row=row, column=2, value="")
+        ws.cell(row=row, column=3, value="")
+        ws.cell(row=row, column=5, value="")
+
+        bu_path = grouped[lot_id]["BU"]
+        wu_path = grouped[lot_id]["WU"]
+        max_img_height = 0
+
+        if bu_path is not None and Path(bu_path).exists():
+            bu_img = XLImage(str(bu_path))
+            if bu_img.width > image_width_px:
+                ratio = image_width_px / bu_img.width
+                bu_img.width = int(bu_img.width * ratio)
+                bu_img.height = int(bu_img.height * ratio)
+            ws.add_image(bu_img, f"D{row}")
+            max_img_height = max(max_img_height, bu_img.height)
+
+        if wu_path is not None and Path(wu_path).exists():
+            wu_img = XLImage(str(wu_path))
+            if wu_img.width > image_width_px:
+                ratio = image_width_px / wu_img.width
+                wu_img.width = int(wu_img.width * ratio)
+                wu_img.height = int(wu_img.height * ratio)
+            ws.add_image(wu_img, f"F{row}")
+            max_img_height = max(max_img_height, wu_img.height)
+
+        ws.row_dimensions[row].height = max(25, int(max_img_height * 0.75))
+        row += 1
+
+    detail_ws = wb.create_sheet("경로_중복정리")
+    detail_ws.append(
+        [
+            "RecordType",
+            "LotID",
+            "Kind",
+            "Status",
+            "DuplicationFlag",
+            "PathA",
+            "PathB",
+            "Etc",
+        ]
+    )
+
     for idx, rec in enumerate(records, start=1):
         bbox_text = "" if rec["bbox"] is None else str(rec["bbox"])
         dst_text = "" if rec["dst"] is None else str(rec["dst"])
-        ws.cell(row=row, column=1, value=rec["lot_id"])
-        ws.cell(row=row, column=2, value=rec["kind"])
-        ws.cell(row=row, column=3, value=rec["status"])
-        ws.cell(row=row, column=4, value=bbox_text)
-        ws.cell(row=row, column=5, value=str(rec["src"]))
-        ws.cell(row=row, column=6, value=dst_text)
-
-        if rec["dst"] is not None and rec["dst"].exists():
-            img = XLImage(str(rec["dst"]))
-            if img.width > image_width_px:
-                ratio = image_width_px / img.width
-                img.width = int(img.width * ratio)
-                img.height = int(img.height * ratio)
-            ws.add_image(img, f"G{row}")
-            ws.row_dimensions[row].height = max(80, int(img.height * 0.75))
-
+        detail_ws.append(
+            [
+                "CROP",
+                rec["lot_id"],
+                rec["kind"],
+                rec["status"],
+                rec.get("renamed_on_save", "FALSE"),
+                str(rec["src"]),
+                dst_text,
+                bbox_text,
+            ]
+        )
         if idx == 1 or idx % 10 == 0 or idx == total:
             print_progress("  엑셀 진행", idx, total, done=(idx == total))
 
-        row += 1
+    if merge_rows:
+        for row in merge_rows:
+            detail_ws.append(
+                [
+                    "MERGE",
+                    row["lot_id"],
+                    "",
+                    "",
+                    "TRUE" if row.get("selected_latest_final") == "FALSE" else "FALSE",
+                    row.get("folder_path", ""),
+                    "",
+                    f"created={row.get('created_time','')}, modified={row.get('modified_time','')}",
+                ]
+            )
 
     ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 10
-    ws.column_dimensions["C"].width = 24
-    ws.column_dimensions["D"].width = 25
-    ws.column_dimensions["E"].width = 60
-    ws.column_dimensions["F"].width = 60
-    ws.column_dimensions["G"].width = 40
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 36
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 36
+    detail_ws.column_dimensions["A"].width = 12
+    detail_ws.column_dimensions["B"].width = 26
+    detail_ws.column_dimensions["C"].width = 10
+    detail_ws.column_dimensions["D"].width = 24
+    detail_ws.column_dimensions["E"].width = 16
+    detail_ws.column_dimensions["F"].width = 60
+    detail_ws.column_dimensions["G"].width = 60
+    detail_ws.column_dimensions["H"].width = 44
     wb.save(excel_path)
 
 
@@ -355,7 +428,7 @@ def main():
     merge_report_path = write_merge_report(merge_rows, merged_root)
 
     crop_records = crop_images(merged_root, cropped_root, threshold, padding)
-    write_excel(crop_records, excel_path)
+    write_excel(crop_records, excel_path, merge_rows=merge_rows)
 
     duplicate_count = len(merge_rows) - len(latest_by_lotid)
     ok_count = sum(1 for r in crop_records if r["status"] == "OK")
