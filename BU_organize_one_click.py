@@ -1,0 +1,325 @@
+import csv
+import re
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from PIL import Image
+
+ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
+
+
+def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    if total <= 0:
+        return
+    percent = (current / total) * 100
+    end = "\n" if done else "\r"
+    print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
+
+
+def ask_int(prompt: str, default: int) -> int:
+    raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
+    if not raw:
+        return default
+    return int(raw)
+
+
+def folder_time_key(path: Path) -> tuple[float, float]:
+    stat = path.stat()
+    return (stat.st_ctime, stat.st_mtime)
+
+
+def is_lotid_folder(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    image_count = 0
+    for child in path.iterdir():
+        if child.is_file() and child.suffix.lower() in ALLOWED_EXTENSIONS:
+            image_count += 1
+    return image_count >= 1
+
+
+def format_ts(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
+    latest_by_lotid: dict[str, Path] = {}
+    rows: list[dict] = []
+
+    dir_candidates = [p for p in integrated_root.rglob("*") if p.is_dir()]
+    total_dirs = len(dir_candidates)
+    print(f"\n[1/5] LotID 폴더 스캔 시작 (대상 폴더: {total_dirs}개)")
+
+    for idx, p in enumerate(dir_candidates, start=1):
+        if idx == 1 or idx % 50 == 0 or idx == total_dirs:
+            print_progress("  스캔 진행", idx, total_dirs, done=(idx == total_dirs))
+
+        if not is_lotid_folder(p):
+            continue
+
+        lot_id = p.name
+        current = latest_by_lotid.get(lot_id)
+        is_latest = False
+
+        if current is None or folder_time_key(p) > folder_time_key(current):
+            latest_by_lotid[lot_id] = p
+            is_latest = True
+
+        created_ts = p.stat().st_ctime
+        modified_ts = p.stat().st_mtime
+        rows.append(
+            {
+                "lot_id": lot_id,
+                "folder_path": str(p),
+                "created_time": format_ts(created_ts),
+                "modified_time": format_ts(modified_ts),
+                "selected_latest_at_scan_time": "TRUE" if is_latest else "FALSE",
+            }
+        )
+
+    selected_paths = {str(v) for v in latest_by_lotid.values()}
+    for row in rows:
+        row["selected_latest_final"] = "TRUE" if row["folder_path"] in selected_paths else "FALSE"
+
+    return latest_by_lotid, rows
+
+
+def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> None:
+    if output_root.exists():
+        shutil.rmtree(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    items = sorted(latest_by_lotid.items())
+    total = len(items)
+    print(f"\n[2/5] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
+
+    for idx, (lot_id, src) in enumerate(items, start=1):
+        dst = output_root / lot_id
+        shutil.copytree(src, dst)
+        if idx == 1 or idx % 20 == 0 or idx == total:
+            print_progress("  복사 진행", idx, total, done=(idx == total))
+
+
+def write_merge_report(rows: list[dict], output_root: Path) -> Path:
+    report_path = output_root / "merge_report.csv"
+    fieldnames = [
+        "lot_id",
+        "folder_path",
+        "created_time",
+        "modified_time",
+        "selected_latest_at_scan_time",
+        "selected_latest_final",
+    ]
+    print("\n[3/5] Merge 리포트 저장")
+    with report_path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print("  Merge 리포트 저장 완료")
+    return report_path
+
+
+def find_non_black_bbox(img: Image.Image, threshold: int = 12):
+    gray = img.convert("L")
+    w, h = gray.size
+    px = gray.load()
+
+    min_x, min_y = w, h
+    max_x, max_y = -1, -1
+
+    for y in range(h):
+        for x in range(w):
+            if px[x, y] > threshold:
+                if x < min_x:
+                    min_x = x
+                if y < min_y:
+                    min_y = y
+                if x > max_x:
+                    max_x = x
+                if y > max_y:
+                    max_y = y
+
+    if max_x < min_x or max_y < min_y:
+        return None
+    return min_x, min_y, max_x + 1, max_y + 1
+
+
+def add_padding(box, w: int, h: int, pad: int):
+    left, top, right, bottom = box
+    return (
+        max(0, left - pad),
+        max(0, top - pad),
+        min(w, right + pad),
+        min(h, bottom + pad),
+    )
+
+
+def parse_lot_kind(stem: str):
+    m = LOT_PATTERN.match(stem)
+    if not m:
+        return stem, "UNKNOWN"
+    return m.group("lotid"), m.group("kind").upper()
+
+
+def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int):
+    if output_root.exists():
+        shutil.rmtree(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    image_files = [
+        p for p in input_root.rglob("*") if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS
+    ]
+    total_images = len(image_files)
+    print(f"\n[4/5] 이미지 크롭 시작 (대상: {total_images}개)")
+
+    records = []
+    for idx, src in enumerate(image_files, start=1):
+        rel = src.relative_to(input_root)
+        dst = output_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        lot_id, kind = parse_lot_kind(src.stem)
+
+        try:
+            with Image.open(src) as img:
+                bbox = find_non_black_bbox(img, threshold=threshold)
+                if bbox is None:
+                    cropped = img.copy()
+                    used_bbox = (0, 0, img.width, img.height)
+                    status = "NO_OBJECT_DETECTED"
+                else:
+                    used_bbox = add_padding(bbox, img.width, img.height, padding)
+                    cropped = img.crop(used_bbox)
+                    status = "OK"
+
+                if dst.suffix.lower() in (".jpg", ".jpeg") and cropped.mode not in ("RGB", "L"):
+                    cropped = cropped.convert("RGB")
+                cropped.save(dst)
+
+            records.append(
+                {
+                    "lot_id": lot_id,
+                    "kind": kind,
+                    "src": src,
+                    "dst": dst,
+                    "bbox": used_bbox,
+                    "status": status,
+                }
+            )
+        except Exception as exc:
+            records.append(
+                {
+                    "lot_id": lot_id,
+                    "kind": kind,
+                    "src": src,
+                    "dst": None,
+                    "bbox": None,
+                    "status": f"ERROR: {exc}",
+                }
+            )
+
+        if idx == 1 or idx % 10 == 0 or idx == total_images:
+            print_progress("  크롭 진행", idx, total_images, done=(idx == total_images))
+
+    return records
+
+
+def write_excel(records, excel_path: Path, image_width_px: int = 240):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "cropped_images"
+    ws.append(["LotID", "Kind", "Status", "CropBBox", "SourcePath", "CroppedPath", "Preview"])
+
+    total = len(records)
+    print(f"\n[5/5] 엑셀 작성 시작 (행: {total}개)")
+
+    row = 2
+    for idx, rec in enumerate(records, start=1):
+        bbox_text = "" if rec["bbox"] is None else str(rec["bbox"])
+        dst_text = "" if rec["dst"] is None else str(rec["dst"])
+        ws.cell(row=row, column=1, value=rec["lot_id"])
+        ws.cell(row=row, column=2, value=rec["kind"])
+        ws.cell(row=row, column=3, value=rec["status"])
+        ws.cell(row=row, column=4, value=bbox_text)
+        ws.cell(row=row, column=5, value=str(rec["src"]))
+        ws.cell(row=row, column=6, value=dst_text)
+
+        if rec["dst"] is not None and rec["dst"].exists():
+            img = XLImage(str(rec["dst"]))
+            if img.width > image_width_px:
+                ratio = image_width_px / img.width
+                img.width = int(img.width * ratio)
+                img.height = int(img.height * ratio)
+            ws.add_image(img, f"G{row}")
+            ws.row_dimensions[row].height = max(80, int(img.height * 0.75))
+
+        if idx == 1 or idx % 10 == 0 or idx == total:
+            print_progress("  엑셀 진행", idx, total, done=(idx == total))
+
+        row += 1
+
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 10
+    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["D"].width = 25
+    ws.column_dimensions["E"].width = 60
+    ws.column_dimensions["F"].width = 60
+    ws.column_dimensions["G"].width = 40
+    wb.save(excel_path)
+
+
+def main():
+    print("\n--- BU Organize One Click v1 ---")
+    integrated_root = Path(input("1) 폴더 입력 경로: ").strip().replace('"', ""))
+    if not integrated_root.exists() or not integrated_root.is_dir():
+        print(f"🚨 폴더를 찾을 수 없어: {integrated_root}")
+        return
+
+    threshold = ask_int("2) 비검정 판정 임계값(0~255)", 12)
+    padding = ask_int("3) 크롭 패딩(px)", 8)
+
+    merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
+    cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
+    excel_path = cropped_root / "crop_report.xlsx"
+
+    print(f"\n📌 원본 통합 폴더: {integrated_root}")
+    print(f"📌 정리 폴더(merge): {merged_root}")
+    print(f"📌 크롭 폴더: {cropped_root}")
+    print(f"📌 엑셀 리포트: {excel_path}")
+    print(f"📌 임계값: {threshold}, 패딩: {padding}")
+
+    latest_by_lotid, merge_rows = collect_latest_lotid_folders(integrated_root)
+    if not latest_by_lotid:
+        print("⚠️ LotID 폴더를 찾지 못했어. 폴더 구조를 확인해줘.")
+        return
+
+    copy_latest_folders(latest_by_lotid, merged_root)
+    merge_report_path = write_merge_report(merge_rows, merged_root)
+
+    crop_records = crop_images(merged_root, cropped_root, threshold, padding)
+    write_excel(crop_records, excel_path)
+
+    duplicate_count = len(merge_rows) - len(latest_by_lotid)
+    ok_count = sum(1 for r in crop_records if r["status"] == "OK")
+    nodetect_count = sum(1 for r in crop_records if r["status"] == "NO_OBJECT_DETECTED")
+    error_count = sum(1 for r in crop_records if r["status"].startswith("ERROR"))
+
+    print("\n--- 최종 결과 ---")
+    print(f"Merge 스캔 LotID 폴더 수: {len(merge_rows)}")
+    print(f"Merge 최종 LotID 수: {len(latest_by_lotid)}")
+    print(f"Merge 중복 제외 수: {duplicate_count}")
+    print(f"Crop 전체 이미지 수: {len(crop_records)}")
+    print(f"Crop 성공: {ok_count}")
+    print(f"Crop 객체 미검출(원본 유지): {nodetect_count}")
+    print(f"Crop 오류: {error_count}")
+    print(f"Merge 리포트: {merge_report_path}")
+    print(f"Crop 엑셀: {excel_path}")
+    print("완료!")
+
+
+if __name__ == "__main__":
+    main()
