@@ -21,6 +21,22 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
     print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
 
 
+def unique_file_path(path: Path) -> Path:
+    # 동일 파일명이 이미 있으면 파일명 뒤에 _1, _2 ... 를 붙여 저장 경로를 만든다.
+    if not path.exists():
+        return path
+
+    parent = path.parent
+    stem = path.stem
+    suffix = path.suffix
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}_{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
 def ask_int(prompt: str, default: int) -> int:
     # 숫자 입력(엔터면 기본값 사용)
     raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
@@ -93,6 +109,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
         rel = src.relative_to(input_root)
         dst = output_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
+        dst = unique_file_path(dst)
 
         lot_id, kind = parse_lot_kind(src.stem)
 

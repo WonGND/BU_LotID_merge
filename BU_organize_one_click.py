@@ -23,6 +23,36 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
     print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
 
 
+def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
+    # 동일 폴더명이 이미 있으면 _1, _2 ... 를 붙여 새 경로를 만든다.
+    candidate = base_dir / folder_name
+    if not candidate.exists():
+        return candidate
+
+    idx = 1
+    while True:
+        candidate = base_dir / f"{folder_name}_{idx}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def unique_file_path(path: Path) -> Path:
+    # 동일 파일명이 이미 있으면 파일명 뒤에 _1, _2 ... 를 붙여 저장 경로를 만든다.
+    if not path.exists():
+        return path
+
+    parent = path.parent
+    stem = path.stem
+    suffix = path.suffix
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}_{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
 def ask_int(prompt: str, default: int) -> int:
     # 숫자 입력(엔터면 기본값 사용)
     raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
@@ -107,7 +137,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
     print(f"\n[2/5] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
 
     for idx, (lot_id, src) in enumerate(items, start=1):
-        dst = output_root / lot_id
+        dst = unique_folder_path(output_root, lot_id)
         shutil.copytree(src, dst)
         if idx == 1 or idx % 20 == 0 or idx == total:
             print_progress("  복사 진행", idx, total, done=(idx == total))
@@ -197,6 +227,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
         rel = src.relative_to(input_root)
         dst = output_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
+        dst = unique_file_path(dst)
 
         lot_id, kind = parse_lot_kind(src.stem)
 

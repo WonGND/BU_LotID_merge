@@ -16,6 +16,20 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
     print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
 
 
+def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
+    # 동일 폴더명이 이미 있으면 _1, _2 ... 를 붙여 새 경로를 만든다.
+    candidate = base_dir / folder_name
+    if not candidate.exists():
+        return candidate
+
+    idx = 1
+    while True:
+        candidate = base_dir / f"{folder_name}_{idx}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
 def folder_time_key(path: Path) -> tuple[float, float]:
     # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
     stat = path.stat()
@@ -97,7 +111,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
     print(f"\n[2/3] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
 
     for idx, (lot_id, src) in enumerate(items, start=1):
-        dst = output_root / lot_id
+        dst = unique_folder_path(output_root, lot_id)
         shutil.copytree(src, dst)
         if idx == 1 or idx % 20 == 0 or idx == total:
             print_progress("  복사 진행", idx, total, done=(idx == total))
