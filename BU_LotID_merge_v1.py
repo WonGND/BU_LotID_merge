@@ -3,10 +3,12 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+# 처리 대상 이미지 확장자 (필요하면 여기서 추가/삭제)
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    # 진행률 표시 공통 함수
     if total <= 0:
         return
     percent = (current / total) * 100
@@ -15,12 +17,14 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
+    # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
     stat = path.stat()
     # Windows에서는 ctime이 생성 시각으로 동작한다.
     return (stat.st_ctime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
+    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리
     if not path.is_dir():
         return False
     image_count = 0
@@ -31,10 +35,12 @@ def is_lotid_folder(path: Path) -> bool:
 
 
 def format_ts(ts: float) -> str:
+    # CSV 가독성을 위해 타임스탬프를 날짜 문자열로 변환
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
+    # 전체 폴더를 훑어서 LotID별 최신 폴더 1개만 남긴다.
     latest_by_lotid: dict[str, Path] = {}
     rows: list[dict] = []
 
@@ -81,6 +87,7 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
 
 
 def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> None:
+    # 최종 선택된 LotID 폴더만 결과 폴더로 복사
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -97,6 +104,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
 
 
 def write_report(rows: list[dict], output_root: Path) -> Path:
+    # 병합 판단 결과를 CSV로 저장
     report_path = output_root / "merge_report.csv"
     fieldnames = [
         "lot_id",
@@ -116,6 +124,10 @@ def write_report(rows: list[dict], output_root: Path) -> Path:
 
 
 def main() -> None:
+    # 실행 순서:
+    # 1) 입력 폴더 확인
+    # 2) 최신 LotID 선별
+    # 3) 선별 폴더 복사 + 리포트 저장
     print("\n--- LotID 최신 폴더 취합 v1 ---")
     raw_input_dir = input("👉 통합폴더 경로를 입력하세요: ").strip().replace('"', "")
     integrated_root = Path(raw_input_dir)

@@ -8,11 +8,14 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
 
+# 처리 대상 이미지 확장자
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+# 파일명에서 LotID/종류(BU, WU)를 뽑기 위한 패턴
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    # 진행률 표시 공통 함수
     if total <= 0:
         return
     percent = (current / total) * 100
@@ -21,6 +24,7 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
 
 
 def ask_int(prompt: str, default: int) -> int:
+    # 숫자 입력(엔터면 기본값 사용)
     raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
     if not raw:
         return default
@@ -28,11 +32,13 @@ def ask_int(prompt: str, default: int) -> int:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
+    # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
     stat = path.stat()
     return (stat.st_ctime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
+    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리
     if not path.is_dir():
         return False
     image_count = 0
@@ -43,10 +49,12 @@ def is_lotid_folder(path: Path) -> bool:
 
 
 def format_ts(ts: float) -> str:
+    # CSV 가독성을 위해 타임스탬프를 날짜 문자열로 변환
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
+    # 전체 폴더를 훑어서 LotID별 최신 폴더 1개만 남긴다.
     latest_by_lotid: dict[str, Path] = {}
     rows: list[dict] = []
 
@@ -89,6 +97,7 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
 
 
 def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> None:
+    # 최종 선택된 LotID 폴더만 결과 폴더로 복사
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -105,6 +114,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
 
 
 def write_merge_report(rows: list[dict], output_root: Path) -> Path:
+    # 병합(merge) 판단 결과를 CSV로 저장
     report_path = output_root / "merge_report.csv"
     fieldnames = [
         "lot_id",
@@ -124,6 +134,8 @@ def write_merge_report(rows: list[dict], output_root: Path) -> Path:
 
 
 def find_non_black_bbox(img: Image.Image, threshold: int = 12):
+    # 검은 배경(저밝기)을 제외한 영역의 최소 사각형(BBox) 검출
+    # threshold를 올리면 더 어두운 영역까지 배경으로 간주한다.
     gray = img.convert("L")
     w, h = gray.size
     px = gray.load()
@@ -149,6 +161,7 @@ def find_non_black_bbox(img: Image.Image, threshold: int = 12):
 
 
 def add_padding(box, w: int, h: int, pad: int):
+    # 잘림 방지를 위해 크롭 박스에 여백(padding) 추가
     left, top, right, bottom = box
     return (
         max(0, left - pad),
@@ -159,6 +172,8 @@ def add_padding(box, w: int, h: int, pad: int):
 
 
 def parse_lot_kind(stem: str):
+    # 파일명에서 LotID와 BU/WU를 파싱
+    # 패턴 불일치 시 kind=UNKNOWN으로 처리
     m = LOT_PATTERN.match(stem)
     if not m:
         return stem, "UNKNOWN"
@@ -166,6 +181,7 @@ def parse_lot_kind(stem: str):
 
 
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int):
+    # merge 결과 폴더를 대상으로 자동 크롭 실행
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -229,6 +245,8 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
 
 
 def write_excel(records, excel_path: Path, image_width_px: int = 240):
+    # 크롭 결과를 엑셀에 정리하고 미리보기 이미지를 삽입
+    # image_width_px 값을 키우면 엑셀 미리보기 이미지가 더 크게 보인다.
     wb = Workbook()
     ws = wb.active
     ws.title = "cropped_images"
@@ -273,6 +291,11 @@ def write_excel(records, excel_path: Path, image_width_px: int = 240):
 
 
 def main():
+    # 원클릭 실행 순서:
+    # 1) 사용자 입력 3개 수집
+    # 2) LotID 최신 폴더 취합(merge)
+    # 3) merge 결과를 자동 크롭
+    # 4) 엑셀 리포트 생성
     print("\n--- BU Organize One Click v1 ---")
     integrated_root = Path(input("1) 폴더 입력 경로: ").strip().replace('"', ""))
     if not integrated_root.exists() or not integrated_root.is_dir():

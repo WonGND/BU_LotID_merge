@@ -6,11 +6,14 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
 
+# 처리 대상 이미지 확장자
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+# 파일명에서 LotID/종류(BU, WU)를 뽑기 위한 패턴
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    # 진행률 표시 공통 함수
     if total <= 0:
         return
     percent = (current / total) * 100
@@ -19,6 +22,7 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
 
 
 def ask_int(prompt: str, default: int) -> int:
+    # 숫자 입력(엔터면 기본값 사용)
     raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
     if not raw:
         return default
@@ -26,6 +30,8 @@ def ask_int(prompt: str, default: int) -> int:
 
 
 def find_non_black_bbox(img: Image.Image, threshold: int = 12):
+    # 검은 배경(저밝기)을 제외한 영역의 최소 사각형(BBox) 검출
+    # threshold를 올리면 더 어두운 영역까지 배경으로 간주한다.
     gray = img.convert("L")
     w, h = gray.size
     px = gray.load()
@@ -51,6 +57,7 @@ def find_non_black_bbox(img: Image.Image, threshold: int = 12):
 
 
 def add_padding(box, w: int, h: int, pad: int):
+    # 잘림 방지를 위해 크롭 박스에 여백(padding) 추가
     left, top, right, bottom = box
     return (
         max(0, left - pad),
@@ -61,6 +68,8 @@ def add_padding(box, w: int, h: int, pad: int):
 
 
 def parse_lot_kind(stem: str):
+    # 파일명에서 LotID와 BU/WU를 파싱
+    # 패턴 불일치 시 kind=UNKNOWN으로 처리
     m = LOT_PATTERN.match(stem)
     if not m:
         return stem, "UNKNOWN"
@@ -68,6 +77,7 @@ def parse_lot_kind(stem: str):
 
 
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int):
+    # 입력 폴더 전체 이미지를 자동 크롭하여 output_root에 저장
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -131,6 +141,8 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
 
 
 def write_excel(records, excel_path: Path, image_width_px: int = 240):
+    # 크롭 결과를 엑셀에 정리하고 미리보기 이미지를 삽입
+    # image_width_px 값을 키우면 엑셀 미리보기 이미지가 더 크게 보인다.
     wb = Workbook()
     ws = wb.active
     ws.title = "cropped_images"
@@ -175,6 +187,10 @@ def write_excel(records, excel_path: Path, image_width_px: int = 240):
 
 
 def main():
+    # 실행 순서:
+    # 1) 입력 폴더/파라미터 수집
+    # 2) 자동 크롭
+    # 3) 엑셀 리포트 생성
     print("\n--- 검은 배경 이미지 자동 크롭 + 엑셀 삽입 v1 ---")
     raw = input("👉 입력 폴더 경로: ").strip().replace('"', "")
     input_root = Path(raw)
