@@ -6,6 +6,14 @@ from pathlib import Path
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 
 
+def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    if total <= 0:
+        return
+    percent = (current / total) * 100
+    end = "\n" if done else "\r"
+    print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
+
+
 def folder_time_key(path: Path) -> tuple[float, float]:
     stat = path.stat()
     # Windows에서는 ctime이 생성 시각으로 동작한다.
@@ -30,7 +38,14 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
     latest_by_lotid: dict[str, Path] = {}
     rows: list[dict] = []
 
-    for p in integrated_root.rglob("*"):
+    dir_candidates = [p for p in integrated_root.rglob("*") if p.is_dir()]
+    total_dirs = len(dir_candidates)
+    print(f"\n[1/3] LotID 폴더 스캔 시작 (대상 폴더: {total_dirs}개)")
+
+    for idx, p in enumerate(dir_candidates, start=1):
+        if idx == 1 or idx % 50 == 0 or idx == total_dirs:
+            print_progress("  스캔 진행", idx, total_dirs, done=(idx == total_dirs))
+
         if not is_lotid_folder(p):
             continue
 
@@ -58,7 +73,6 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
             }
         )
 
-    # 스캔 순서 때문에 selected_latest_at_scan_time은 최종 상태와 다를 수 있어 보정한다.
     selected_paths = {str(v) for v in latest_by_lotid.values()}
     for row in rows:
         row["selected_latest_final"] = "TRUE" if row["folder_path"] in selected_paths else "FALSE"
@@ -71,9 +85,15 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    for lot_id, src in sorted(latest_by_lotid.items()):
+    items = sorted(latest_by_lotid.items())
+    total = len(items)
+    print(f"\n[2/3] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
+
+    for idx, (lot_id, src) in enumerate(items, start=1):
         dst = output_root / lot_id
         shutil.copytree(src, dst)
+        if idx == 1 or idx % 20 == 0 or idx == total:
+            print_progress("  복사 진행", idx, total, done=(idx == total))
 
 
 def write_report(rows: list[dict], output_root: Path) -> Path:
@@ -86,10 +106,12 @@ def write_report(rows: list[dict], output_root: Path) -> Path:
         "selected_latest_at_scan_time",
         "selected_latest_final",
     ]
+    print("\n[3/3] 리포트 저장")
     with report_path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    print("  리포트 저장 완료")
     return report_path
 
 

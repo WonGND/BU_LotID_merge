@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -7,6 +8,14 @@ from PIL import Image
 
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
+
+
+def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
+    if total <= 0:
+        return
+    percent = (current / total) * 100
+    end = "\n" if done else "\r"
+    print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
 
 
 def ask_int(prompt: str, default: int) -> int:
@@ -60,18 +69,17 @@ def parse_lot_kind(stem: str):
 
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int):
     if output_root.exists():
-        for p in output_root.rglob("*"):
-            if p.is_file():
-                p.unlink()
-        for d in sorted((x for x in output_root.rglob("*") if x.is_dir()), reverse=True):
-            d.rmdir()
+        shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    records = []
-    for src in input_root.rglob("*"):
-        if not src.is_file() or src.suffix.lower() not in ALLOWED_EXTENSIONS:
-            continue
+    image_files = [
+        p for p in input_root.rglob("*") if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS
+    ]
+    total_images = len(image_files)
+    print(f"\n[1/2] 이미지 크롭 시작 (대상: {total_images}개)")
 
+    records = []
+    for idx, src in enumerate(image_files, start=1):
         rel = src.relative_to(input_root)
         dst = output_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +123,10 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
                     "status": f"ERROR: {exc}",
                 }
             )
+
+        if idx == 1 or idx % 10 == 0 or idx == total_images:
+            print_progress("  크롭 진행", idx, total_images, done=(idx == total_images))
+
     return records
 
 
@@ -124,8 +136,11 @@ def write_excel(records, excel_path: Path, image_width_px: int = 240):
     ws.title = "cropped_images"
     ws.append(["LotID", "Kind", "Status", "CropBBox", "SourcePath", "CroppedPath", "Preview"])
 
+    total = len(records)
+    print(f"\n[2/2] 엑셀 작성 시작 (행: {total}개)")
+
     row = 2
-    for rec in records:
+    for idx, rec in enumerate(records, start=1):
         bbox_text = "" if rec["bbox"] is None else str(rec["bbox"])
         dst_text = "" if rec["dst"] is None else str(rec["dst"])
         ws.cell(row=row, column=1, value=rec["lot_id"])
@@ -143,6 +158,9 @@ def write_excel(records, excel_path: Path, image_width_px: int = 240):
                 img.height = int(img.height * ratio)
             ws.add_image(img, f"G{row}")
             ws.row_dimensions[row].height = max(80, int(img.height * 0.75))
+
+        if idx == 1 or idx % 10 == 0 or idx == total:
+            print_progress("  엑셀 진행", idx, total, done=(idx == total))
 
         row += 1
 
