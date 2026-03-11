@@ -1,4 +1,5 @@
 import io
+import os
 import queue
 import threading
 import tkinter as tk
@@ -7,6 +8,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from BU_organize_one_click import run_pipeline
+
+APP_NAME = "TOVIS_BU_DATA_정리_v0.1"
+ICON_PATH = Path(__file__).with_name("tovis_bu_data.ico")
 
 
 class QueueWriter(io.TextIOBase):
@@ -25,9 +29,10 @@ class QueueWriter(io.TextIOBase):
 class BUOrganizeApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("BU Organize One Click")
+        self.root.title(APP_NAME)
         self.root.geometry("980x720")
         self.root.minsize(860, 640)
+        self._apply_icon()
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -41,6 +46,13 @@ class BUOrganizeApp:
 
         self._build_ui()
         self._poll_log_queue()
+
+    def _apply_icon(self) -> None:
+        if ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(str(ICON_PATH))
+            except tk.TclError:
+                pass
 
     def _build_ui(self) -> None:
         self.root.configure(bg="#f3f0e8")
@@ -58,7 +70,7 @@ class BUOrganizeApp:
         outer = ttk.Frame(self.root, style="App.TFrame", padding=18)
         outer.pack(fill="both", expand=True)
 
-        title = ttk.Label(outer, text="BU Organize One Click", style="Title.TLabel")
+        title = ttk.Label(outer, text=APP_NAME, style="Title.TLabel")
         title.pack(anchor="w")
         subtitle = ttk.Label(
             outer,
@@ -199,7 +211,9 @@ class BUOrganizeApp:
         self.status_var.set("완료")
         self.result_var.set(str(result["excel_path"]))
         self._append_log(f"\n완료: {result['excel_path']}\n")
-        messagebox.showinfo("완료", "작업이 완료되었습니다.")
+        should_open = messagebox.askyesno("완료", "작업이 완료되었습니다.\n결과 엑셀 파일을 바로 열까요?")
+        if should_open:
+            self._open_result(result["excel_path"])
 
     def _on_failure(self, error_message: str) -> None:
         self.progress.stop()
@@ -208,6 +222,12 @@ class BUOrganizeApp:
         self.result_var.set("오류로 인해 결과 파일이 생성되지 않았습니다.")
         self._append_log(f"\n오류: {error_message}\n")
         messagebox.showerror("실행 오류", error_message)
+
+    def _open_result(self, result_path: str | Path) -> None:
+        try:
+            os.startfile(str(result_path))
+        except OSError as exc:
+            messagebox.showerror("열기 실패", f"결과 파일을 열지 못했습니다.\n{exc}")
 
 
 def main() -> None:

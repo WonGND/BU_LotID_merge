@@ -11,5 +11,5 @@ python BU_organize_gui.py
 ## EXE Build
 
 ```bash
-pyinstaller --noconsole --onefile --name BU_organize_gui BU_organize_gui.py
+pyinstaller --noconsole --onefile --icon tovis_bu_data.ico --name "TOVIS_BU_DATA_정리_v0.1" BU_organize_gui.py
 ```
