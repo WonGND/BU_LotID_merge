@@ -4,6 +4,10 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
+from openpyxl.styles import Font, PatternFill
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
@@ -13,6 +17,8 @@ ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 # 파일명에서 LotID/종류(BU, WU)를 뽑기 위한 패턴
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
 DATA_FILE_PATTERN = "LMK6DataLog.csv"
+BU_SPEC_MIN = 50.0
+WU_SPEC_MIN = 80.0
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
@@ -99,6 +105,15 @@ def format_measurement_value(value: str) -> str:
     return str(value).strip()
 
 
+def to_float(value) -> float | None:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def iter_csv_dict_rows(csv_path: Path):
     # CSV 인코딩이 파일마다 다를 수 있어서 순차적으로 시도한다.
     encodings = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
@@ -183,6 +198,217 @@ def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[
         )
 
     return latest_by_lotid, rows_for_detail
+
+
+def build_metric_summary(latest_measurements: dict[str, dict], key: str, spec_min: float) -> dict:
+    values = [to_float(row.get(key)) for row in latest_measurements.values()]
+    values = [v for v in values if v is not None]
+    if not values:
+        return {
+            "count": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "min": None,
+            "avg": None,
+            "max": None,
+            "median": None,
+            "sorted_values": [],
+        }
+
+    sorted_values = sorted(values)
+    count = len(sorted_values)
+    mid = count // 2
+    if count % 2 == 0:
+        median = (sorted_values[mid - 1] + sorted_values[mid]) / 2
+    else:
+        median = sorted_values[mid]
+
+    pass_count = sum(1 for value in sorted_values if value >= spec_min)
+    return {
+        "count": count,
+        "pass_count": pass_count,
+        "fail_count": count - pass_count,
+        "min": min(sorted_values),
+        "avg": sum(sorted_values) / count,
+        "max": max(sorted_values),
+        "median": median,
+        "sorted_values": sorted_values,
+    }
+
+
+def build_distribution(values: list[float], bins: list[tuple[str, float, float]]) -> list[tuple[str, int]]:
+    counts: list[tuple[str, int]] = []
+    for label, lower, upper in bins:
+        count = sum(1 for value in values if lower <= value < upper)
+        counts.append((label, count))
+    return counts
+
+
+def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) -> None:
+    ws = wb.create_sheet("시각화")
+    ws["A1"] = "BU/WU 측정 대시보드"
+    ws["A1"].font = Font(size=16, bold=True)
+    ws["A3"] = "지표"
+    ws["B3"] = "Spec Min"
+    ws["C3"] = "Count"
+    ws["D3"] = "Pass"
+    ws["E3"] = "Fail"
+    ws["F3"] = "Min"
+    ws["G3"] = "Avg"
+    ws["H3"] = "Median"
+    ws["I3"] = "Max"
+
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws["3:3"]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    bu_summary = build_metric_summary(latest_measurements, "black_uniformity", BU_SPEC_MIN)
+    wu_summary = build_metric_summary(latest_measurements, "white_uniformity", WU_SPEC_MIN)
+
+    metric_rows = [
+        ("Black Uniformity", BU_SPEC_MIN, bu_summary),
+        ("White Uniformity", WU_SPEC_MIN, wu_summary),
+    ]
+    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=4):
+        ws.cell(row=row_idx, column=1, value=label)
+        ws.cell(row=row_idx, column=2, value=spec_min)
+        ws.cell(row=row_idx, column=3, value=summary["count"])
+        ws.cell(row=row_idx, column=4, value=summary["pass_count"])
+        ws.cell(row=row_idx, column=5, value=summary["fail_count"])
+        ws.cell(row=row_idx, column=6, value=summary["min"])
+        ws.cell(row=row_idx, column=7, value=summary["avg"])
+        ws.cell(row=row_idx, column=8, value=summary["median"])
+        ws.cell(row=row_idx, column=9, value=summary["max"])
+
+    # 정렬 추세 차트용 데이터
+    ws["K2"] = "BU_index"
+    ws["L2"] = "BU_value"
+    ws["M2"] = "BU_spec"
+    for idx, value in enumerate(bu_summary["sorted_values"], start=3):
+        ws.cell(row=idx, column=11, value=idx - 2)
+        ws.cell(row=idx, column=12, value=value)
+        ws.cell(row=idx, column=13, value=BU_SPEC_MIN)
+
+    ws["O2"] = "WU_index"
+    ws["P2"] = "WU_value"
+    ws["Q2"] = "WU_spec"
+    for idx, value in enumerate(wu_summary["sorted_values"], start=3):
+        ws.cell(row=idx, column=15, value=idx - 2)
+        ws.cell(row=idx, column=16, value=value)
+        ws.cell(row=idx, column=17, value=WU_SPEC_MIN)
+
+    bu_line = LineChart()
+    bu_line.title = "BU 분포 추세"
+    bu_line.y_axis.title = "Black Uniformity"
+    bu_line.x_axis.title = "정렬 순서"
+    bu_data = Reference(ws, min_col=12, max_col=13, min_row=2, max_row=max(3, len(bu_summary["sorted_values"]) + 2))
+    bu_cats = Reference(ws, min_col=11, min_row=3, max_row=max(3, len(bu_summary["sorted_values"]) + 2))
+    bu_line.add_data(bu_data, titles_from_data=True)
+    bu_line.set_categories(bu_cats)
+    bu_line.height = 7
+    bu_line.width = 13
+    ws.add_chart(bu_line, "A8")
+
+    wu_line = LineChart()
+    wu_line.title = "WU 분포 추세"
+    wu_line.y_axis.title = "White Uniformity"
+    wu_line.x_axis.title = "정렬 순서"
+    wu_data = Reference(ws, min_col=16, max_col=17, min_row=2, max_row=max(3, len(wu_summary["sorted_values"]) + 2))
+    wu_cats = Reference(ws, min_col=15, min_row=3, max_row=max(3, len(wu_summary["sorted_values"]) + 2))
+    wu_line.add_data(wu_data, titles_from_data=True)
+    wu_line.set_categories(wu_cats)
+    wu_line.height = 7
+    wu_line.width = 13
+    ws.add_chart(wu_line, "N8")
+
+    # Pass/Fail 파이 차트
+    ws["A24"] = "Metric"
+    ws["B24"] = "Pass"
+    ws["C24"] = "Fail"
+    ws["A25"] = "BU"
+    ws["B25"] = bu_summary["pass_count"]
+    ws["C25"] = bu_summary["fail_count"]
+    ws["A26"] = "WU"
+    ws["B26"] = wu_summary["pass_count"]
+    ws["C26"] = wu_summary["fail_count"]
+
+    bu_pie = PieChart()
+    bu_pie.title = "BU Pass/Fail"
+    bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=25, max_row=25), from_rows=True)
+    bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=24, max_row=24))
+    bu_pie.height = 6
+    bu_pie.width = 8
+    bu_pie.dataLabels = DataLabelList()
+    bu_pie.dataLabels.showPercent = True
+    ws.add_chart(bu_pie, "A28")
+
+    wu_pie = PieChart()
+    wu_pie.title = "WU Pass/Fail"
+    wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=26, max_row=26), from_rows=True)
+    wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=24, max_row=24))
+    wu_pie.height = 6
+    wu_pie.width = 8
+    wu_pie.dataLabels = DataLabelList()
+    wu_pie.dataLabels.showPercent = True
+    ws.add_chart(wu_pie, "J28")
+
+    # Spec 기준 중심 버킷 분포
+    bu_bins = [
+        ("<40", 0, 40),
+        ("40-45", 40, 45),
+        ("45-50", 45, 50),
+        ("50-55", 50, 55),
+        ("55-60", 55, 60),
+        ("60+", 60, 9999),
+    ]
+    wu_bins = [
+        ("<70", 0, 70),
+        ("70-75", 70, 75),
+        ("75-80", 75, 80),
+        ("80-85", 80, 85),
+        ("85-90", 85, 90),
+        ("90+", 90, 9999),
+    ]
+    bu_distribution = build_distribution(bu_summary["sorted_values"], bu_bins)
+    wu_distribution = build_distribution(wu_summary["sorted_values"], wu_bins)
+
+    ws["S2"] = "BU_bucket"
+    ws["T2"] = "BU_count"
+    for idx, (label, count) in enumerate(bu_distribution, start=3):
+        ws.cell(row=idx, column=19, value=label)
+        ws.cell(row=idx, column=20, value=count)
+
+    ws["V2"] = "WU_bucket"
+    ws["W2"] = "WU_count"
+    for idx, (label, count) in enumerate(wu_distribution, start=3):
+        ws.cell(row=idx, column=22, value=label)
+        ws.cell(row=idx, column=23, value=count)
+
+    bu_bar = BarChart()
+    bu_bar.title = "BU 분포 구간"
+    bu_bar.y_axis.title = "Count"
+    bu_bar.x_axis.title = "Range"
+    bu_bar.add_data(Reference(ws, min_col=20, min_row=2, max_row=2 + len(bu_distribution)), titles_from_data=True)
+    bu_bar.set_categories(Reference(ws, min_col=19, min_row=3, max_row=2 + len(bu_distribution)))
+    bu_bar.height = 7
+    bu_bar.width = 11
+    ws.add_chart(bu_bar, "T8")
+
+    wu_bar = BarChart()
+    wu_bar.title = "WU 분포 구간"
+    wu_bar.y_axis.title = "Count"
+    wu_bar.x_axis.title = "Range"
+    wu_bar.add_data(Reference(ws, min_col=23, min_row=2, max_row=2 + len(wu_distribution)), titles_from_data=True)
+    wu_bar.set_categories(Reference(ws, min_col=22, min_row=3, max_row=2 + len(wu_distribution)))
+    wu_bar.height = 7
+    wu_bar.width = 11
+    ws.add_chart(wu_bar, "T28")
+
+    ws.column_dimensions["A"].width = 22
+    for col in ("B", "C", "D", "E", "F", "G", "H", "I"):
+        ws.column_dimensions[col].width = 12
 
 
 def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
@@ -440,6 +666,24 @@ def write_excel(
         ws.row_dimensions[row].height = max(25, int(max_img_height * 0.75))
         row += 1
 
+    last_result_row = max(2, row - 1)
+    ws.conditional_formatting.add(
+        f"B2:B{last_result_row}",
+        FormulaRule(formula=['B2="OK"'], fill=PatternFill("solid", fgColor="D1FAE5")),
+    )
+    ws.conditional_formatting.add(
+        f"B2:B{last_result_row}",
+        FormulaRule(formula=['B2="NG"'], fill=PatternFill("solid", fgColor="FEE2E2")),
+    )
+    ws.conditional_formatting.add(
+        f"C2:C{last_result_row}",
+        CellIsRule(operator="lessThan", formula=[str(BU_SPEC_MIN)], fill=PatternFill("solid", fgColor="FEF3C7")),
+    )
+    ws.conditional_formatting.add(
+        f"E2:E{last_result_row}",
+        CellIsRule(operator="lessThan", formula=[str(WU_SPEC_MIN)], fill=PatternFill("solid", fgColor="FEF3C7")),
+    )
+
     detail_ws = wb.create_sheet("경로_중복정리")
     detail_ws.append(
         [
@@ -516,6 +760,7 @@ def write_excel(
     detail_ws.column_dimensions["F"].width = 60
     detail_ws.column_dimensions["G"].width = 60
     detail_ws.column_dimensions["H"].width = 44
+    add_visualization_sheet(wb, latest_measurements or {})
     print("\n[7/7] 엑셀 저장")
     wb.save(excel_path)
     print("  엑셀 저장 완료")
