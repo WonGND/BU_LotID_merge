@@ -20,8 +20,7 @@ def print_progress(label: str, current: int, total: int, done: bool = False) -> 
     if total <= 0:
         return
     percent = (current / total) * 100
-    end = "\n" if done else "\r"
-    print(f"{label}: {current}/{total} ({percent:5.1f}%)", end=end, flush=True)
+    print(f"{label}: {current}/{total} ({percent:5.1f}%)", flush=True)
 
 
 def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
@@ -522,26 +521,8 @@ def write_excel(
     print("  엑셀 저장 완료")
 
 
-def main():
-    # 원클릭 실행 순서:
-    # 1) 사용자 입력 3개 수집
-    # 2) LotID 최신 폴더 취합(merge)
-    # 3) merge 결과를 자동 크롭
-    # 4) 엑셀 리포트 생성
-    print("\n--- BU Organize One Click v1 ---")
-    integrated_root = ask_path("1) 이미지 통합 폴더 경로: ")
-    if not integrated_root.exists() or not integrated_root.is_dir():
-        print(f"🚨 폴더를 찾을 수 없어: {integrated_root}")
-        return
-
-    data_root = ask_path("2) 측정 데이터 상위 폴더 경로: ")
-    if not data_root.exists() or not data_root.is_dir():
-        print(f"🚨 측정 데이터 폴더를 찾을 수 없어: {data_root}")
-        return
-
-    threshold = ask_int("3) 비검정 판정 임계값(0~255)", 12)
-    padding = ask_int("4) 크롭 패딩(px)", 8)
-
+def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int) -> dict:
+    # GUI/CLI 공용 실행 함수
     merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
     excel_path = cropped_root / "crop_report.xlsx"
@@ -588,6 +569,43 @@ def main():
     print(f"Merge 리포트: {merge_report_path}")
     print(f"Crop 엑셀: {excel_path}")
     print("완료!")
+
+    return {
+        "merged_root": merged_root,
+        "cropped_root": cropped_root,
+        "excel_path": excel_path,
+        "merge_report_path": merge_report_path,
+        "merge_rows": len(merge_rows),
+        "latest_lotids": len(latest_by_lotid),
+        "latest_measurements": len(latest_measurements),
+        "crop_records": len(crop_records),
+        "crop_ok": ok_count,
+        "crop_nodetect": nodetect_count,
+        "crop_error": error_count,
+    }
+
+
+def main():
+    # 원클릭 실행 순서:
+    # 1) 사용자 입력 수집
+    # 2) LotID 최신 폴더 취합(merge)
+    # 3) 측정 데이터 최신값 집계
+    # 4) merge 결과를 자동 크롭
+    # 5) 엑셀 리포트 생성
+    print("\n--- BU Organize One Click v1 ---")
+    integrated_root = ask_path("1) 이미지 통합 폴더 경로: ")
+    if not integrated_root.exists() or not integrated_root.is_dir():
+        print(f"🚨 폴더를 찾을 수 없어: {integrated_root}")
+        return
+
+    data_root = ask_path("2) 측정 데이터 상위 폴더 경로: ")
+    if not data_root.exists() or not data_root.is_dir():
+        print(f"🚨 측정 데이터 폴더를 찾을 수 없어: {data_root}")
+        return
+
+    threshold = ask_int("3) 비검정 판정 임계값(0~255)", 12)
+    padding = ask_int("4) 크롭 패딩(px)", 8)
+    run_pipeline(integrated_root, data_root, threshold, padding)
 
 
 if __name__ == "__main__":
