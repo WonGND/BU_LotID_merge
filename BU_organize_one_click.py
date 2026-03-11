@@ -100,6 +100,29 @@ def format_measurement_value(value: str) -> str:
     return str(value).strip()
 
 
+def iter_csv_dict_rows(csv_path: Path):
+    # CSV 인코딩이 파일마다 다를 수 있어서 순차적으로 시도한다.
+    encodings = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
+    last_error = None
+
+    for encoding in encodings:
+        try:
+            with csv_path.open("r", encoding=encoding, newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            return rows
+        except UnicodeDecodeError as exc:
+            last_error = exc
+
+    raise UnicodeDecodeError(
+        getattr(last_error, "encoding", "unknown"),
+        getattr(last_error, "object", b""),
+        getattr(last_error, "start", 0),
+        getattr(last_error, "end", 1),
+        f"{csv_path} 파일 인코딩을 읽지 못함",
+    )
+
+
 def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[dict]]:
     # 여러 LMK6DataLog.csv를 재귀 탐색해 Panel_ID 기준 최신 행만 남긴다.
     csv_files = sorted(data_root.rglob(DATA_FILE_PATTERN))
@@ -116,41 +139,39 @@ def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[
         if file_idx == 1 or file_idx % 10 == 0 or file_idx == total_files:
             print_progress("  CSV 스캔 진행", file_idx, total_files, done=(file_idx == total_files))
 
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                lot_id = (row.get("Panel_ID") or "").strip()
-                if not lot_id:
-                    continue
+        for row in iter_csv_dict_rows(csv_path):
+            lot_id = (row.get("Panel_ID") or "").strip()
+            if not lot_id:
+                continue
 
-                measured_at_raw = row.get("Time", "")
-                measured_at = parse_lmk_time(measured_at_raw)
-                record = {
+            measured_at_raw = row.get("Time", "")
+            measured_at = parse_lmk_time(measured_at_raw)
+            record = {
+                "lot_id": lot_id,
+                "judge": (row.get("Judge") or "").strip(),
+                "black_uniformity": format_measurement_value(row.get("Black_Uniformity")),
+                "white_uniformity": format_measurement_value(row.get("White_Uniformity")),
+                "time_raw": measured_at_raw,
+                "time_obj": measured_at,
+                "source_file": str(csv_path),
+            }
+
+            current = latest_by_lotid.get(lot_id)
+            is_latest = current is None or measured_at >= current["time_obj"]
+            if is_latest:
+                latest_by_lotid[lot_id] = record
+
+            rows_for_detail.append(
+                {
                     "lot_id": lot_id,
-                    "judge": (row.get("Judge") or "").strip(),
-                    "black_uniformity": format_measurement_value(row.get("Black_Uniformity")),
-                    "white_uniformity": format_measurement_value(row.get("White_Uniformity")),
+                    "judge": record["judge"],
+                    "black_uniformity": record["black_uniformity"],
+                    "white_uniformity": record["white_uniformity"],
                     "time_raw": measured_at_raw,
-                    "time_obj": measured_at,
                     "source_file": str(csv_path),
+                    "selected_latest_final": "FALSE",
                 }
-
-                current = latest_by_lotid.get(lot_id)
-                is_latest = current is None or measured_at >= current["time_obj"]
-                if is_latest:
-                    latest_by_lotid[lot_id] = record
-
-                rows_for_detail.append(
-                    {
-                        "lot_id": lot_id,
-                        "judge": record["judge"],
-                        "black_uniformity": record["black_uniformity"],
-                        "white_uniformity": record["white_uniformity"],
-                        "time_raw": measured_at_raw,
-                        "source_file": str(csv_path),
-                        "selected_latest_final": "FALSE",
-                    }
-                )
+            )
 
     latest_signatures = {
         (value["lot_id"], value["time_raw"], value["source_file"]) for value in latest_by_lotid.values()
