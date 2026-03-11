@@ -4,8 +4,10 @@ import queue
 import threading
 import tkinter as tk
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+import sys
 
 from BU_organize_one_click import PipelineCancelled, run_pipeline
 
@@ -13,17 +15,42 @@ APP_NAME = "TOVIS_BU_DATA_정리_v0.1"
 ICON_PATH = Path(__file__).with_name("tovis_bu_data.ico")
 
 
+def get_app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+LOG_PATH = get_app_base_dir() / "TOVIS_BU_DATA_정리_v0.1_log.txt"
+
+
 class QueueWriter(io.TextIOBase):
-    def __init__(self, log_queue: queue.Queue):
+    def __init__(self, log_queue: queue.Queue, log_path: Path):
         self.log_queue = log_queue
+        self.log_path = log_path
+        self._buffer = ""
+
+    def _write_line(self, text: str) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {text}\n"
+        self.log_queue.put(line)
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(line)
 
     def write(self, s: str) -> int:
-        if s:
-            self.log_queue.put(s)
+        if not s:
+            return 0
+        self._buffer += s
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                self._write_line(line)
         return len(s)
 
     def flush(self) -> None:
-        return
+        if self._buffer.strip():
+            self._write_line(self._buffer.rstrip())
+        self._buffer = ""
 
 
 class BUOrganizeApp:
@@ -44,6 +71,7 @@ class BUOrganizeApp:
         self.padding_var = tk.StringVar(value="8")
         self.status_var = tk.StringVar(value="대기 중")
         self.result_var = tk.StringVar(value="결과 파일 경로가 여기에 표시됩니다.")
+        self.log_path_var = tk.StringVar(value=str(LOG_PATH))
 
         self._build_ui()
         self._poll_log_queue()
@@ -107,6 +135,8 @@ class BUOrganizeApp:
         ttk.Label(status_card, textvariable=self.status_var, style="Body.TLabel").pack(anchor="w", pady=(6, 0))
         ttk.Label(status_card, text="결과 엑셀", style="Field.TLabel").pack(anchor="w", pady=(12, 0))
         ttk.Label(status_card, textvariable=self.result_var, style="Body.TLabel", wraplength=900).pack(anchor="w", pady=(6, 0))
+        ttk.Label(status_card, text="로그 파일", style="Field.TLabel").pack(anchor="w", pady=(12, 0))
+        ttk.Label(status_card, textvariable=self.log_path_var, style="Body.TLabel", wraplength=900).pack(anchor="w", pady=(6, 0))
 
         log_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
         log_card.pack(fill="both", expand=True, pady=(14, 0))
@@ -203,9 +233,16 @@ class BUOrganizeApp:
         self.worker.start()
 
     def _run_worker(self, image_root: Path, data_root: Path, threshold: int, padding: int) -> None:
-        writer = QueueWriter(self.log_queue)
+        writer = QueueWriter(self.log_queue, LOG_PATH)
         try:
             with redirect_stdout(writer), redirect_stderr(writer):
+                print("=" * 70)
+                print(f"{APP_NAME} 실행 시작")
+                print(f"이미지 통합 폴더: {image_root}")
+                print(f"측정 데이터 폴더: {data_root}")
+                print(f"비검정 임계값: {threshold}")
+                print(f"크롭 패딩: {padding}")
+                print(f"로그 파일: {LOG_PATH}")
                 result = run_pipeline(
                     image_root,
                     data_root,
@@ -213,10 +250,19 @@ class BUOrganizeApp:
                     padding,
                     cancel_check=self.cancel_requested.is_set,
                 )
+                print(f"실행 완료: {result['excel_path']}")
+                print("=" * 70)
+                writer.flush()
             self.root.after(0, self._on_success, result)
         except PipelineCancelled as exc:
+            writer.write(f"실행 중지: {exc}\n")
+            writer.write("=" * 70 + "\n")
+            writer.flush()
             self.root.after(0, self._on_cancelled, str(exc))
         except Exception as exc:
+            writer.write(f"실행 오류: {exc}\n")
+            writer.write("=" * 70 + "\n")
+            writer.flush()
             self.root.after(0, self._on_failure, str(exc))
 
     def _on_success(self, result: dict) -> None:
