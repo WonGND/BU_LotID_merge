@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from BU_organize_one_click import run_pipeline
+from BU_organize_one_click import PipelineCancelled, run_pipeline
 
 APP_NAME = "TOVIS_BU_DATA_정리_v0.1"
 ICON_PATH = Path(__file__).with_name("tovis_bu_data.ico")
@@ -36,6 +36,7 @@ class BUOrganizeApp:
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.cancel_requested = threading.Event()
 
         self.image_root_var = tk.StringVar()
         self.data_root_var = tk.StringVar()
@@ -93,9 +94,12 @@ class BUOrganizeApp:
 
         self.run_button = ttk.Button(action_row, text="실행", style="Run.TButton", command=self.start_run)
         self.run_button.grid(row=0, column=0, sticky="ew")
+        self.stop_button = ttk.Button(action_row, text="중지", style="Path.TButton", command=self.stop_run, state="disabled")
+        self.stop_button.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        action_row.columnconfigure(1, weight=1)
 
         self.progress = ttk.Progressbar(action_row, mode="indeterminate")
-        self.progress.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
         status_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
         status_card.pack(fill="x", pady=(14, 0))
@@ -181,9 +185,11 @@ class BUOrganizeApp:
             messagebox.showerror("입력 오류", "임계값과 패딩은 숫자로 입력해야 합니다.")
             return
 
+        self.cancel_requested.clear()
         self.status_var.set("실행 중")
         self.result_var.set("작업이 진행 중입니다.")
         self.run_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
         self.progress.start(10)
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
@@ -200,14 +206,23 @@ class BUOrganizeApp:
         writer = QueueWriter(self.log_queue)
         try:
             with redirect_stdout(writer), redirect_stderr(writer):
-                result = run_pipeline(image_root, data_root, threshold, padding)
+                result = run_pipeline(
+                    image_root,
+                    data_root,
+                    threshold,
+                    padding,
+                    cancel_check=self.cancel_requested.is_set,
+                )
             self.root.after(0, self._on_success, result)
+        except PipelineCancelled as exc:
+            self.root.after(0, self._on_cancelled, str(exc))
         except Exception as exc:
             self.root.after(0, self._on_failure, str(exc))
 
     def _on_success(self, result: dict) -> None:
         self.progress.stop()
         self.run_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
         self.status_var.set("완료")
         self.result_var.set(str(result["excel_path"]))
         self._append_log(f"\n완료: {result['excel_path']}\n")
@@ -215,13 +230,30 @@ class BUOrganizeApp:
         if should_open:
             self._open_result(result["excel_path"])
 
+    def _on_cancelled(self, message: str) -> None:
+        self.progress.stop()
+        self.run_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+        self.status_var.set("중지됨")
+        self.result_var.set("사용자 요청으로 작업이 중지되었습니다.")
+        self._append_log(f"\n중지: {message}\n")
+        messagebox.showinfo("중지됨", message)
+
     def _on_failure(self, error_message: str) -> None:
         self.progress.stop()
         self.run_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
         self.status_var.set("오류 발생")
         self.result_var.set("오류로 인해 결과 파일이 생성되지 않았습니다.")
         self._append_log(f"\n오류: {error_message}\n")
         messagebox.showerror("실행 오류", error_message)
+
+    def stop_run(self) -> None:
+        if self.worker and self.worker.is_alive():
+            self.cancel_requested.set()
+            self.status_var.set("중지 요청됨")
+            self.stop_button.configure(state="disabled")
+            self._append_log("\n중지 요청: 현재 단계 완료 후 안전하게 작업을 멈춥니다.\n")
 
     def _open_result(self, result_path: str | Path) -> None:
         try:

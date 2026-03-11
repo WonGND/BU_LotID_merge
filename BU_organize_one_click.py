@@ -21,12 +21,21 @@ BU_SPEC_MIN = 50.0
 WU_SPEC_MIN = 80.0
 
 
+class PipelineCancelled(Exception):
+    pass
+
+
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
     # 진행률 표시 공통 함수
     if total <= 0:
         return
     percent = (current / total) * 100
     print(f"{label}: {current}/{total} ({percent:5.1f}%)", flush=True)
+
+
+def ensure_not_cancelled(cancel_check=None) -> None:
+    if cancel_check and cancel_check():
+        raise PipelineCancelled("사용자 요청으로 작업이 중지되었습니다.")
 
 
 def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
@@ -137,7 +146,7 @@ def iter_csv_dict_rows(csv_path: Path):
     )
 
 
-def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[dict]]:
+def collect_latest_measurements(data_root: Path, cancel_check=None) -> tuple[dict[str, dict], list[dict]]:
     # 여러 LMK6DataLog.csv를 재귀 탐색해 Panel_ID 기준 최신 행만 남긴다.
     csv_files = sorted(data_root.rglob(DATA_FILE_PATTERN))
     total_files = len(csv_files)
@@ -150,10 +159,12 @@ def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[
         return latest_by_lotid, rows_for_detail
 
     for file_idx, csv_path in enumerate(csv_files, start=1):
+        ensure_not_cancelled(cancel_check)
         if file_idx == 1 or file_idx % 10 == 0 or file_idx == total_files:
             print_progress("  CSV 스캔 진행", file_idx, total_files, done=(file_idx == total_files))
 
         for row in iter_csv_dict_rows(csv_path):
+            ensure_not_cancelled(cancel_check)
             lot_id = (row.get("Panel_ID") or "").strip()
             if not lot_id:
                 continue
@@ -411,7 +422,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
         ws.column_dimensions[col].width = 12
 
 
-def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
+def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tuple[dict[str, Path], list[dict]]:
     # 전체 폴더를 훑어서 LotID별 최신 폴더 1개만 남긴다.
     latest_by_lotid: dict[str, Path] = {}
     rows: list[dict] = []
@@ -421,6 +432,7 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
     print(f"\n[1/7] LotID 폴더 스캔 시작 (대상 폴더: {total_dirs}개)")
 
     for idx, p in enumerate(dir_candidates, start=1):
+        ensure_not_cancelled(cancel_check)
         if idx == 1 or idx % 50 == 0 or idx == total_dirs:
             print_progress("  스캔 진행", idx, total_dirs, done=(idx == total_dirs))
 
@@ -454,7 +466,7 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
     return latest_by_lotid, rows
 
 
-def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> None:
+def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path, cancel_check=None) -> None:
     # 최종 선택된 LotID 폴더만 결과 폴더로 복사
     if output_root.exists():
         shutil.rmtree(output_root)
@@ -465,6 +477,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
     print(f"\n[2/7] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
 
     for idx, (lot_id, src) in enumerate(items, start=1):
+        ensure_not_cancelled(cancel_check)
         dst = unique_folder_path(output_root, lot_id)
         shutil.copytree(src, dst)
         if idx == 1 or idx % 20 == 0 or idx == total:
@@ -538,7 +551,7 @@ def parse_lot_kind(stem: str):
     return m.group("lotid"), m.group("kind").upper()
 
 
-def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int):
+def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int, cancel_check=None):
     # merge 결과 폴더를 대상으로 자동 크롭 실행
     if output_root.exists():
         shutil.rmtree(output_root)
@@ -552,6 +565,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
 
     records = []
     for idx, src in enumerate(image_files, start=1):
+        ensure_not_cancelled(cancel_check)
         rel = src.relative_to(input_root)
         dst_raw = output_root / rel
         dst = dst_raw
@@ -614,6 +628,7 @@ def write_excel(
     latest_measurements=None,
     measurement_rows=None,
     image_width_px: int = 240,
+    cancel_check=None,
 ):
     # 결과 시트: LotID별 BU/WU 이미지 배치 (사용자 입력 컬럼은 공란 유지)
     # 상세 시트: 경로/중복 정보 정리 (이미지 없음)
@@ -635,6 +650,7 @@ def write_excel(
 
     row = 2
     for lot_id in sorted(grouped.keys()):
+        ensure_not_cancelled(cancel_check)
         ws.cell(row=row, column=1, value=lot_id)
         measurement = (latest_measurements or {}).get(lot_id, {})
         ws.cell(row=row, column=2, value=measurement.get("judge", ""))
@@ -699,6 +715,7 @@ def write_excel(
     )
 
     for idx, rec in enumerate(records, start=1):
+        ensure_not_cancelled(cancel_check)
         bbox_text = "" if rec["bbox"] is None else str(rec["bbox"])
         dst_text = "" if rec["dst"] is None else str(rec["dst"])
         detail_ws.append(
@@ -718,6 +735,7 @@ def write_excel(
 
     if merge_rows:
         for row in merge_rows:
+            ensure_not_cancelled(cancel_check)
             detail_ws.append(
                 [
                     "MERGE",
@@ -733,6 +751,7 @@ def write_excel(
 
     if measurement_rows:
         for row in measurement_rows:
+            ensure_not_cancelled(cancel_check)
             detail_ws.append(
                 [
                     "MEASURE",
@@ -766,7 +785,7 @@ def write_excel(
     print("  엑셀 저장 완료")
 
 
-def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int) -> dict:
+def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int, cancel_check=None) -> dict:
     # GUI/CLI 공용 실행 함수
     merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
@@ -779,22 +798,24 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
     print(f"📌 엑셀 리포트: {excel_path}")
     print(f"📌 임계값: {threshold}, 패딩: {padding}")
 
-    latest_by_lotid, merge_rows = collect_latest_lotid_folders(integrated_root)
+    ensure_not_cancelled(cancel_check)
+    latest_by_lotid, merge_rows = collect_latest_lotid_folders(integrated_root, cancel_check=cancel_check)
     if not latest_by_lotid:
         print("⚠️ LotID 폴더를 찾지 못했어. 폴더 구조를 확인해줘.")
         return
 
-    copy_latest_folders(latest_by_lotid, merged_root)
+    copy_latest_folders(latest_by_lotid, merged_root, cancel_check=cancel_check)
     merge_report_path = write_merge_report(merge_rows, merged_root)
 
-    latest_measurements, measurement_rows = collect_latest_measurements(data_root)
-    crop_records = crop_images(merged_root, cropped_root, threshold, padding)
+    latest_measurements, measurement_rows = collect_latest_measurements(data_root, cancel_check=cancel_check)
+    crop_records = crop_images(merged_root, cropped_root, threshold, padding, cancel_check=cancel_check)
     write_excel(
         crop_records,
         excel_path,
         merge_rows=merge_rows,
         latest_measurements=latest_measurements,
         measurement_rows=measurement_rows,
+        cancel_check=cancel_check,
     )
 
     duplicate_count = len(merge_rows) - len(latest_by_lotid)
