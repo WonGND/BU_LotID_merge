@@ -12,6 +12,7 @@ from PIL import Image
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 # 파일명에서 LotID/종류(BU, WU)를 뽑기 위한 패턴
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
+DATA_FILE_PATTERN = "LMK6DataLog.csv"
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
@@ -61,6 +62,10 @@ def ask_int(prompt: str, default: int) -> int:
     return int(raw)
 
 
+def ask_path(prompt: str) -> Path:
+    return Path(input(prompt).strip().replace('"', ""))
+
+
 def folder_time_key(path: Path) -> tuple[float, float]:
     # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
     stat = path.stat()
@@ -83,6 +88,83 @@ def format_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_lmk_time(value: str) -> datetime:
+    # LMK 로그 시간 형식: 2026.02.24 09:30:51
+    return datetime.strptime(value.strip(), "%Y.%m.%d %H:%M:%S")
+
+
+def format_measurement_value(value: str) -> str:
+    # 엑셀에는 핵심 수치만 간단히 넣는다.
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def collect_latest_measurements(data_root: Path) -> tuple[dict[str, dict], list[dict]]:
+    # 여러 LMK6DataLog.csv를 재귀 탐색해 Panel_ID 기준 최신 행만 남긴다.
+    csv_files = sorted(data_root.rglob(DATA_FILE_PATTERN))
+    total_files = len(csv_files)
+    print(f"\n[4/7] 측정 CSV 스캔 시작 (대상 파일: {total_files}개)")
+
+    latest_by_lotid: dict[str, dict] = {}
+    rows_for_detail: list[dict] = []
+    if total_files == 0:
+        print("  측정 CSV를 찾지 못해서 데이터 입력은 공란으로 둔다.")
+        return latest_by_lotid, rows_for_detail
+
+    for file_idx, csv_path in enumerate(csv_files, start=1):
+        if file_idx == 1 or file_idx % 10 == 0 or file_idx == total_files:
+            print_progress("  CSV 스캔 진행", file_idx, total_files, done=(file_idx == total_files))
+
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                lot_id = (row.get("Panel_ID") or "").strip()
+                if not lot_id:
+                    continue
+
+                measured_at_raw = row.get("Time", "")
+                measured_at = parse_lmk_time(measured_at_raw)
+                record = {
+                    "lot_id": lot_id,
+                    "judge": (row.get("Judge") or "").strip(),
+                    "black_uniformity": format_measurement_value(row.get("Black_Uniformity")),
+                    "white_uniformity": format_measurement_value(row.get("White_Uniformity")),
+                    "time_raw": measured_at_raw,
+                    "time_obj": measured_at,
+                    "source_file": str(csv_path),
+                }
+
+                current = latest_by_lotid.get(lot_id)
+                is_latest = current is None or measured_at >= current["time_obj"]
+                if is_latest:
+                    latest_by_lotid[lot_id] = record
+
+                rows_for_detail.append(
+                    {
+                        "lot_id": lot_id,
+                        "judge": record["judge"],
+                        "black_uniformity": record["black_uniformity"],
+                        "white_uniformity": record["white_uniformity"],
+                        "time_raw": measured_at_raw,
+                        "source_file": str(csv_path),
+                        "selected_latest_final": "FALSE",
+                    }
+                )
+
+    latest_signatures = {
+        (value["lot_id"], value["time_raw"], value["source_file"]) for value in latest_by_lotid.values()
+    }
+    for row in rows_for_detail:
+        row["selected_latest_final"] = (
+            "TRUE"
+            if (row["lot_id"], row["time_raw"], row["source_file"]) in latest_signatures
+            else "FALSE"
+        )
+
+    return latest_by_lotid, rows_for_detail
+
+
 def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path], list[dict]]:
     # 전체 폴더를 훑어서 LotID별 최신 폴더 1개만 남긴다.
     latest_by_lotid: dict[str, Path] = {}
@@ -90,7 +172,7 @@ def collect_latest_lotid_folders(integrated_root: Path) -> tuple[dict[str, Path]
 
     dir_candidates = [p for p in integrated_root.rglob("*") if p.is_dir()]
     total_dirs = len(dir_candidates)
-    print(f"\n[1/5] LotID 폴더 스캔 시작 (대상 폴더: {total_dirs}개)")
+    print(f"\n[1/7] LotID 폴더 스캔 시작 (대상 폴더: {total_dirs}개)")
 
     for idx, p in enumerate(dir_candidates, start=1):
         if idx == 1 or idx % 50 == 0 or idx == total_dirs:
@@ -134,7 +216,7 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path) -> 
 
     items = sorted(latest_by_lotid.items())
     total = len(items)
-    print(f"\n[2/5] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
+    print(f"\n[2/7] 최신 LotID 폴더 복사 시작 (대상: {total}개)")
 
     for idx, (lot_id, src) in enumerate(items, start=1):
         dst = unique_folder_path(output_root, lot_id)
@@ -154,7 +236,7 @@ def write_merge_report(rows: list[dict], output_root: Path) -> Path:
         "selected_latest_at_scan_time",
         "selected_latest_final",
     ]
-    print("\n[3/5] Merge 리포트 저장")
+    print("\n[3/7] Merge 리포트 저장")
     with report_path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -220,7 +302,7 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
         p for p in input_root.rglob("*") if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS
     ]
     total_images = len(image_files)
-    print(f"\n[4/5] 이미지 크롭 시작 (대상: {total_images}개)")
+    print(f"\n[5/7] 이미지 크롭 시작 (대상: {total_images}개)")
 
     records = []
     for idx, src in enumerate(image_files, start=1):
@@ -279,7 +361,14 @@ def crop_images(input_root: Path, output_root: Path, threshold: int, padding: in
     return records
 
 
-def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int = 240):
+def write_excel(
+    records,
+    excel_path: Path,
+    merge_rows=None,
+    latest_measurements=None,
+    measurement_rows=None,
+    image_width_px: int = 240,
+):
     # 결과 시트: LotID별 BU/WU 이미지 배치 (사용자 입력 컬럼은 공란 유지)
     # 상세 시트: 경로/중복 정보 정리 (이미지 없음)
     wb = Workbook()
@@ -288,7 +377,7 @@ def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int 
     ws.append(["LotID", "판정", "BU data", "BU Image", "WU data", "WU Image"])
 
     total = len(records)
-    print(f"\n[5/5] 엑셀 작성 시작 (행: {total}개)")
+    print(f"\n[6/7] 엑셀 작성 시작 (행: {total}개)")
 
     grouped: dict[str, dict[str, Path | None]] = {}
     for rec in records:
@@ -301,9 +390,10 @@ def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int 
     row = 2
     for lot_id in sorted(grouped.keys()):
         ws.cell(row=row, column=1, value=lot_id)
-        ws.cell(row=row, column=2, value="")
-        ws.cell(row=row, column=3, value="")
-        ws.cell(row=row, column=5, value="")
+        measurement = (latest_measurements or {}).get(lot_id, {})
+        ws.cell(row=row, column=2, value=measurement.get("judge", ""))
+        ws.cell(row=row, column=3, value=measurement.get("black_uniformity", ""))
+        ws.cell(row=row, column=5, value=measurement.get("white_uniformity", ""))
 
         bu_path = grouped[lot_id]["BU"]
         wu_path = grouped[lot_id]["WU"]
@@ -377,6 +467,21 @@ def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int 
                 ]
             )
 
+    if measurement_rows:
+        for row in measurement_rows:
+            detail_ws.append(
+                [
+                    "MEASURE",
+                    row["lot_id"],
+                    "",
+                    row["judge"],
+                    "FALSE" if row.get("selected_latest_final") == "TRUE" else "TRUE",
+                    row["source_file"],
+                    "",
+                    f"time={row['time_raw']}, BU={row['black_uniformity']}, WU={row['white_uniformity']}",
+                ]
+            )
+
     ws.column_dimensions["A"].width = 26
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 14
@@ -391,7 +496,9 @@ def write_excel(records, excel_path: Path, merge_rows=None, image_width_px: int 
     detail_ws.column_dimensions["F"].width = 60
     detail_ws.column_dimensions["G"].width = 60
     detail_ws.column_dimensions["H"].width = 44
+    print("\n[7/7] 엑셀 저장")
     wb.save(excel_path)
+    print("  엑셀 저장 완료")
 
 
 def main():
@@ -401,19 +508,25 @@ def main():
     # 3) merge 결과를 자동 크롭
     # 4) 엑셀 리포트 생성
     print("\n--- BU Organize One Click v1 ---")
-    integrated_root = Path(input("1) 폴더 입력 경로: ").strip().replace('"', ""))
+    integrated_root = ask_path("1) 이미지 통합 폴더 경로: ")
     if not integrated_root.exists() or not integrated_root.is_dir():
         print(f"🚨 폴더를 찾을 수 없어: {integrated_root}")
         return
 
-    threshold = ask_int("2) 비검정 판정 임계값(0~255)", 12)
-    padding = ask_int("3) 크롭 패딩(px)", 8)
+    data_root = ask_path("2) 측정 데이터 상위 폴더 경로: ")
+    if not data_root.exists() or not data_root.is_dir():
+        print(f"🚨 측정 데이터 폴더를 찾을 수 없어: {data_root}")
+        return
+
+    threshold = ask_int("3) 비검정 판정 임계값(0~255)", 12)
+    padding = ask_int("4) 크롭 패딩(px)", 8)
 
     merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
     excel_path = cropped_root / "crop_report.xlsx"
 
     print(f"\n📌 원본 통합 폴더: {integrated_root}")
+    print(f"📌 측정 데이터 폴더: {data_root}")
     print(f"📌 정리 폴더(merge): {merged_root}")
     print(f"📌 크롭 폴더: {cropped_root}")
     print(f"📌 엑셀 리포트: {excel_path}")
@@ -427,8 +540,15 @@ def main():
     copy_latest_folders(latest_by_lotid, merged_root)
     merge_report_path = write_merge_report(merge_rows, merged_root)
 
+    latest_measurements, measurement_rows = collect_latest_measurements(data_root)
     crop_records = crop_images(merged_root, cropped_root, threshold, padding)
-    write_excel(crop_records, excel_path, merge_rows=merge_rows)
+    write_excel(
+        crop_records,
+        excel_path,
+        merge_rows=merge_rows,
+        latest_measurements=latest_measurements,
+        measurement_rows=measurement_rows,
+    )
 
     duplicate_count = len(merge_rows) - len(latest_by_lotid)
     ok_count = sum(1 for r in crop_records if r["status"] == "OK")
@@ -440,6 +560,7 @@ def main():
     print(f"Merge 최종 LotID 수: {len(latest_by_lotid)}")
     print(f"Merge 중복 제외 수: {duplicate_count}")
     print(f"Crop 전체 이미지 수: {len(crop_records)}")
+    print(f"측정 최신 LotID 수: {len(latest_measurements)}")
     print(f"Crop 성공: {ok_count}")
     print(f"Crop 객체 미검출(원본 유지): {nodetect_count}")
     print(f"Crop 오류: {error_count}")
