@@ -11,7 +11,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
-from PIL import Image
+from PIL import Image, ImageDraw
 
 # 처리 대상 이미지 확장자
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
@@ -804,7 +804,66 @@ def analyze_bu_grid(
             "max_delta": max(delta_values) if delta_values else None,
             "inner_trim": inner_trim,
             "analyzed_size": (width, height),
+            "x_edges": x_edges,
+            "y_edges": y_edges,
         }
+
+
+def find_worst_points(analysis: dict, top_n: int = 3) -> list[dict]:
+    candidates = []
+    for row_idx, row in enumerate(analysis["cell_deltas"], start=1):
+        for col_idx, delta in enumerate(row, start=1):
+            if delta is None:
+                continue
+            candidates.append(
+                {
+                    "row": row_idx,
+                    "col": col_idx,
+                    "delta": delta,
+                    "coord": f"({col_idx},{row_idx})",
+                }
+            )
+
+    candidates.sort(key=lambda item: (-item["delta"], item["row"], item["col"]))
+    return candidates[:top_n]
+
+
+def build_worst_point_overlay(image_path: Path, analysis: dict, overlay_path: Path) -> tuple[Path, list[dict]]:
+    worst_points = find_worst_points(analysis, top_n=3)
+    with Image.open(image_path) as img:
+        overlay = img.convert("RGB")
+        draw = ImageDraw.Draw(overlay)
+        width, height = overlay.size
+        trim = analysis.get("inner_trim", 0)
+
+        # 실제 grid 분석에 사용된 내부 영역을 녹색 사각형으로 표시
+        draw.rectangle(
+            (trim, trim, max(trim, width - trim - 1), max(trim, height - trim - 1)),
+            outline=(0, 220, 90),
+            width=3,
+        )
+
+        x_edges = analysis.get("x_edges", [])
+        y_edges = analysis.get("y_edges", [])
+        for rank, point in enumerate(worst_points, start=1):
+            col_idx = point["col"] - 1
+            row_idx = point["row"] - 1
+            center_x = trim + int((x_edges[col_idx] + x_edges[col_idx + 1]) / 2)
+            center_y = trim + int((y_edges[row_idx] + y_edges[row_idx + 1]) / 2)
+            point["pixel_x"] = center_x
+            point["pixel_y"] = center_y
+
+            radius = 7
+            draw.ellipse(
+                (center_x - radius, center_y - radius, center_x + radius, center_y + radius),
+                fill=(220, 20, 20),
+                outline=(255, 255, 255),
+                width=2,
+            )
+            draw.text((center_x + 10, center_y - 10), f"{rank}:{point['coord']}", fill=(220, 20, 20))
+
+        overlay.save(overlay_path)
+    return overlay_path, worst_points
 
 
 def write_bu_analysis_excel(
@@ -828,6 +887,9 @@ def write_bu_analysis_excel(
             "유효셀수(5px)",
             "최소편차(5px)",
             "최대편차(5px)",
+            "Worst1",
+            "Worst2",
+            "Worst3",
             "분석위치",
             "분석상태",
         ]
@@ -857,6 +919,7 @@ def write_bu_analysis_excel(
 
     analysis_count = 0
     detail_start_row = 8
+    worst_point_frequency: dict[str, int] = {}
 
     for idx, rec in enumerate(sorted(bu_records, key=lambda item: item["lot_id"]), start=1):
         ensure_not_cancelled(cancel_check)
@@ -885,6 +948,11 @@ def write_bu_analysis_excel(
                 ]
             )
         else:
+            overlay_path = Path(rec["dst"]).with_name(f"{Path(rec['dst']).stem}_worst_overlay{Path(rec['dst']).suffix}")
+            overlay_path, worst_points = build_worst_point_overlay(Path(rec["dst"]), analysis, overlay_path)
+            for point in worst_points:
+                worst_point_frequency[point["coord"]] = worst_point_frequency.get(point["coord"], 0) + 1
+
             detail_ws.merge_cells(start_row=detail_start_row, start_column=1, end_row=detail_start_row, end_column=8)
             detail_ws.cell(row=detail_start_row, column=1, value=f"{lot_id} | {model_name or 'Model N/A'}")
             detail_ws.cell(row=detail_start_row, column=1).font = Font(size=14, bold=True, color="FFFFFF")
@@ -908,9 +976,15 @@ def write_bu_analysis_excel(
             detail_ws.cell(row=detail_start_row + 4, column=5, value="음수=더 밝음 / 양수=더 어두움")
             detail_ws.cell(row=detail_start_row + 5, column=4, value="비교 trim")
             detail_ws.cell(row=detail_start_row + 5, column=5, value="5px")
+            detail_ws.cell(row=detail_start_row + 1, column=7, value="Worst1")
+            detail_ws.cell(row=detail_start_row + 1, column=8, value=worst_points[0]["coord"] if len(worst_points) >= 1 else "")
+            detail_ws.cell(row=detail_start_row + 2, column=7, value="Worst2")
+            detail_ws.cell(row=detail_start_row + 2, column=8, value=worst_points[1]["coord"] if len(worst_points) >= 2 else "")
+            detail_ws.cell(row=detail_start_row + 3, column=7, value="Worst3")
+            detail_ws.cell(row=detail_start_row + 3, column=8, value=worst_points[2]["coord"] if len(worst_points) >= 3 else "")
 
-            if Path(rec["dst"]).exists():
-                bu_img = XLImage(str(rec["dst"]))
+            if overlay_path.exists():
+                bu_img = XLImage(str(overlay_path))
                 if bu_img.width > 280:
                     ratio = 280 / bu_img.width
                     bu_img.width = int(bu_img.width * ratio)
@@ -982,6 +1056,9 @@ def write_bu_analysis_excel(
                     analyses[5]["valid_cells"],
                     analyses[5]["min_delta"],
                     analyses[5]["max_delta"],
+                    worst_points[0]["coord"] if len(worst_points) >= 1 else "",
+                    worst_points[1]["coord"] if len(worst_points) >= 2 else "",
+                    worst_points[2]["coord"] if len(worst_points) >= 3 else "",
                     f"BU_Grid_전체 row {detail_start_row}",
                     "OK",
                 ]
@@ -1003,6 +1080,15 @@ def write_bu_analysis_excel(
     summary_ws["M5"] = f"밝기 > threshold({threshold})"
     summary_ws["L6"] = "비교 trim"
     summary_ws["M6"] = "5px"
+    summary_ws["L8"] = "Worst Point Frequency"
+    summary_ws["L9"] = "Coord"
+    summary_ws["M9"] = "Count"
+    for idx, (coord, count) in enumerate(
+        sorted(worst_point_frequency.items(), key=lambda item: (-item[1], item[0])),
+        start=10,
+    ):
+        summary_ws.cell(row=idx, column=12, value=coord)
+        summary_ws.cell(row=idx, column=13, value=count)
     for col, width in {
         "A": 24,
         "B": 24,
@@ -1011,10 +1097,12 @@ def write_bu_analysis_excel(
         "E": 14,
         "F": 12,
         "G": 12,
-        "H": 24,
-        "I": 16,
+        "H": 14,
+        "I": 14,
+        "J": 14,
+        "K": 24,
         "L": 16,
-        "M": 44,
+        "M": 16,
     }.items():
         summary_ws.column_dimensions[col].width = width
 
