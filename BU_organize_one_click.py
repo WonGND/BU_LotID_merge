@@ -20,8 +20,10 @@ LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
 DATA_FILE_PATTERN = "LMK6DataLog.csv"
 BU_SPEC_MIN = 50.0
 WU_SPEC_MIN = 80.0
-BU_GRID_COLS = 50
-BU_GRID_ROWS = 26
+BU_GRID_COLS = 48
+BU_GRID_ROWS = 27
+DETAIL_ROW_HEIGHT = 22
+INNER_TRIM_VARIANTS = (0, 5, 10, 15, 30)
 MODEL_NAME_CANDIDATES = (
     "Model_Name",
     "ModelName",
@@ -300,6 +302,40 @@ def write_kpi_table(ws, start_row: int, start_col: int, title: str, rows: list[t
         ws.cell(row=start_row + offset, column=start_col).font = Font(bold=True, color="374151")
 
 
+def style_line_chart(chart: LineChart, value_color: str, spec_color: str) -> None:
+    chart.style = 10
+    chart.legend.position = "b"
+    chart.height = 7.8
+    chart.width = 13.5
+    chart.smooth = True
+    if len(chart.ser) >= 1:
+        chart.ser[0].graphicalProperties.line.solidFill = value_color
+        chart.ser[0].graphicalProperties.line.width = 22000
+        chart.ser[0].marker.symbol = "circle"
+        chart.ser[0].marker.size = 6
+    if len(chart.ser) >= 2:
+        chart.ser[1].graphicalProperties.line.solidFill = spec_color
+        chart.ser[1].graphicalProperties.line.prstDash = "dash"
+        chart.ser[1].graphicalProperties.line.width = 14000
+
+
+def style_bar_chart(chart: BarChart, fill_color: str) -> None:
+    chart.style = 11
+    chart.legend = None
+    chart.height = 7.6
+    chart.width = 11.8
+    if len(chart.ser) >= 1:
+        chart.ser[0].graphicalProperties.solidFill = fill_color
+        chart.ser[0].graphicalProperties.line.solidFill = fill_color
+
+
+def style_pie_chart(chart: PieChart) -> None:
+    chart.style = 26
+    chart.legend.position = "b"
+    chart.height = 6.4
+    chart.width = 8.4
+
+
 def pick_worst_lotids(latest_measurements: dict[str, dict], key: str, limit: int = 10) -> list[tuple[str, str, float]]:
     rows = []
     for lot_id, measurement in latest_measurements.items():
@@ -389,8 +425,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_cats = Reference(ws, min_col=11, min_row=10, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
     bu_line.add_data(bu_data, titles_from_data=True)
     bu_line.set_categories(bu_cats)
-    bu_line.height = 7
-    bu_line.width = 13
+    style_line_chart(bu_line, "DC2626", "94A3B8")
     ws.add_chart(bu_line, "A14")
 
     wu_line = LineChart()
@@ -401,8 +436,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     wu_cats = Reference(ws, min_col=15, min_row=10, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
     wu_line.add_data(wu_data, titles_from_data=True)
     wu_line.set_categories(wu_cats)
-    wu_line.height = 7
-    wu_line.width = 13
+    style_line_chart(wu_line, "16A34A", "94A3B8")
     ws.add_chart(wu_line, "N14")
 
     # Pass/Fail 파이 차트
@@ -420,20 +454,20 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_pie.title = "BU Pass/Fail"
     bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=32, max_row=32), from_rows=True)
     bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
-    bu_pie.height = 6
-    bu_pie.width = 8
     bu_pie.dataLabels = DataLabelList()
     bu_pie.dataLabels.showPercent = True
+    bu_pie.dataLabels.showVal = True
+    style_pie_chart(bu_pie)
     ws.add_chart(bu_pie, "A35")
 
     wu_pie = PieChart()
     wu_pie.title = "WU Pass/Fail"
     wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=33, max_row=33), from_rows=True)
     wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
-    wu_pie.height = 6
-    wu_pie.width = 8
     wu_pie.dataLabels = DataLabelList()
     wu_pie.dataLabels.showPercent = True
+    wu_pie.dataLabels.showVal = True
+    style_pie_chart(wu_pie)
     ws.add_chart(wu_pie, "J35")
 
     # Spec 기준 중심 버킷 분포
@@ -474,8 +508,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_bar.x_axis.title = "Range"
     bu_bar.add_data(Reference(ws, min_col=20, min_row=9, max_row=9 + len(bu_distribution)), titles_from_data=True)
     bu_bar.set_categories(Reference(ws, min_col=19, min_row=10, max_row=9 + len(bu_distribution)))
-    bu_bar.height = 7
-    bu_bar.width = 11
+    style_bar_chart(bu_bar, "DC2626")
     ws.add_chart(bu_bar, "T14")
 
     wu_bar = BarChart()
@@ -484,8 +517,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     wu_bar.x_axis.title = "Range"
     wu_bar.add_data(Reference(ws, min_col=23, min_row=9, max_row=9 + len(wu_distribution)), titles_from_data=True)
     wu_bar.set_categories(Reference(ws, min_col=22, min_row=10, max_row=9 + len(wu_distribution)))
-    wu_bar.height = 7
-    wu_bar.width = 11
+    style_bar_chart(wu_bar, "16A34A")
     ws.add_chart(wu_bar, "T35")
 
     write_kpi_table(
@@ -659,9 +691,36 @@ def build_safe_sheet_name(base_name: str, used_names: set[str]) -> str:
         idx += 1
 
 
-def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_COLS, grid_rows: int = BU_GRID_ROWS) -> dict:
+def analyze_bu_grid(
+    image_path: Path,
+    threshold: int,
+    grid_cols: int = BU_GRID_COLS,
+    grid_rows: int = BU_GRID_ROWS,
+    inner_trim: int = 0,
+) -> dict:
     with Image.open(image_path) as img:
         rgb_img = img.convert("RGB")
+        if inner_trim > 0:
+            width, height = rgb_img.size
+            left = inner_trim
+            top = inner_trim
+            right = width - inner_trim
+            bottom = height - inner_trim
+            if right <= left or bottom <= top:
+                return {
+                    "overall_average": None,
+                    "grid_rows": grid_rows,
+                    "grid_cols": grid_cols,
+                    "cell_deltas": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "valid_cells": 0,
+                    "valid_pixels": 0,
+                    "min_delta": None,
+                    "max_delta": None,
+                    "inner_trim": inner_trim,
+                    "analyzed_size": (0, 0),
+                }
+            rgb_img = rgb_img.crop((left, top, right, bottom))
         width, height = rgb_img.size
         px = rgb_img.load()
 
@@ -683,6 +742,8 @@ def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_C
                 "valid_pixels": 0,
                 "min_delta": None,
                 "max_delta": None,
+                "inner_trim": inner_trim,
+                "analyzed_size": (width, height),
             }
 
         overall_average = sum(valid_pixels) / len(valid_pixels)
@@ -703,9 +764,11 @@ def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_C
                 left = x_edges[col_idx]
                 right = x_edges[col_idx + 1]
                 cell_values = []
+                fallback_values = []
                 for y in range(top, bottom):
                     for x in range(left, right):
                         luminance = compute_luminance(px[x, y])
+                        fallback_values.append(luminance)
                         if luminance > threshold:
                             cell_values.append(luminance)
 
@@ -715,8 +778,13 @@ def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_C
                     valid_cells += 1
                     delta_values.append(delta)
                 else:
-                    cell_average = None
-                    delta = None
+                    if fallback_values:
+                        cell_average = sum(fallback_values) / len(fallback_values)
+                    else:
+                        # 분할 경계 반올림으로 빈 셀이 생기면 전체 평균으로 채워 빈칸을 막는다.
+                        cell_average = overall_average
+                    delta = overall_average - cell_average
+                    delta_values.append(delta)
 
                 avg_row.append(cell_average)
                 delta_row.append(delta)
@@ -734,6 +802,8 @@ def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_C
             "valid_pixels": len(valid_pixels),
             "min_delta": min(delta_values) if delta_values else None,
             "max_delta": max(delta_values) if delta_values else None,
+            "inner_trim": inner_trim,
+            "analyzed_size": (width, height),
         }
 
 
@@ -754,11 +824,15 @@ def write_bu_analysis_excel(
             "ModelName",
             "판정",
             "BU data",
-            "전체평균밝기",
-            "유효셀수",
-            "최소편차",
-            "최대편차",
-            "분석시트명",
+            "BaseAvg(0px)",
+            "Trim5Avg",
+            "Trim10Avg",
+            "Trim15Avg",
+            "Trim30Avg",
+            "유효셀수(0px)",
+            "최소편차(0px)",
+            "최대편차(0px)",
+            "분석위치",
             "분석상태",
         ]
     )
@@ -775,6 +849,8 @@ def write_bu_analysis_excel(
     detail_ws["B4"] = "편차 = 전체평균밝기 - 셀평균밝기, 밝음=- / 어두움=+"
     detail_ws["A5"] = "비검정 기준"
     detail_ws["B5"] = f"밝기 > threshold({threshold}) 인 픽셀만 사용"
+    detail_ws["A6"] = "추가 내부 축소"
+    detail_ws["B6"] = "0px / 5px / 10px / 15px / 30px를 각각 비교"
 
     bu_records = [
         rec for rec in records
@@ -792,7 +868,11 @@ def write_bu_analysis_excel(
         measurement = latest_measurements.get(lot_id, {})
         model_name = measurement.get("model_name", "")
 
-        analysis = analyze_bu_grid(Path(rec["dst"]), threshold)
+        analyses = {
+            trim: analyze_bu_grid(Path(rec["dst"]), threshold, inner_trim=trim)
+            for trim in INNER_TRIM_VARIANTS
+        }
+        analysis = analyses[0]
         if analysis["overall_average"] is None:
             summary_ws.append(
                 [
@@ -800,6 +880,9 @@ def write_bu_analysis_excel(
                     model_name,
                     measurement.get("judge", ""),
                     measurement.get("black_uniformity", ""),
+                    "",
+                    "",
+                    "",
                     "",
                     0,
                     "",
@@ -830,6 +913,8 @@ def write_bu_analysis_excel(
             detail_ws.cell(row=detail_start_row + 3, column=5, value=str(rec.get("bbox", "")))
             detail_ws.cell(row=detail_start_row + 4, column=4, value="설명")
             detail_ws.cell(row=detail_start_row + 4, column=5, value="음수=더 밝음 / 양수=더 어두움")
+            detail_ws.cell(row=detail_start_row + 5, column=4, value="비교 trim")
+            detail_ws.cell(row=detail_start_row + 5, column=5, value="0px / 5px / 10px / 15px / 30px")
 
             if Path(rec["dst"]).exists():
                 bu_img = XLImage(str(rec["dst"]))
@@ -838,44 +923,61 @@ def write_bu_analysis_excel(
                     bu_img.width = int(bu_img.width * ratio)
                     bu_img.height = int(bu_img.height * ratio)
                 detail_ws.add_image(bu_img, f"A{detail_start_row + 6}")
-                image_height = max(12, int(bu_img.height * 0.75))
-                for image_row in range(detail_start_row + 6, detail_start_row + 20):
-                    detail_ws.row_dimensions[image_row].height = image_height / 14
 
-            grid_header_row = detail_start_row + 6
-            grid_start_col = 11
-            detail_ws.cell(row=grid_header_row, column=grid_start_col - 1, value="Row\\Col")
-            for col_idx in range(analysis["grid_cols"]):
-                detail_ws.cell(row=grid_header_row, column=grid_start_col + col_idx, value=col_idx + 1)
+            section_top_row = detail_start_row + 6
+            grid_start_col = 7
+            trim_colors = {0: "1D4ED8", 5: "0F766E", 10: "7C3AED", 15: "B45309", 30: "BE123C"}
+            for trim_index, trim in enumerate(INNER_TRIM_VARIANTS):
+                trim_analysis = analyses[trim]
+                title_row = section_top_row + trim_index * (BU_GRID_ROWS + 3)
+                grid_header_row = title_row + 1
 
-            for row_idx in range(analysis["grid_rows"]):
-                detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col - 1, value=row_idx + 1)
-                for col_idx in range(analysis["grid_cols"]):
-                    delta = analysis["cell_deltas"][row_idx][col_idx]
-                    cell = detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col + col_idx, value=delta)
-                    if delta is not None:
-                        cell.number_format = "0.00"
+                detail_ws.merge_cells(
+                    start_row=title_row,
+                    start_column=grid_start_col - 1,
+                    end_row=title_row,
+                    end_column=grid_start_col + 6,
+                )
+                detail_ws.cell(row=title_row, column=grid_start_col - 1, value=f"Grid Data | Inner Trim {trim}px")
+                detail_ws.cell(row=title_row, column=grid_start_col - 1).font = Font(bold=True, color="FFFFFF")
+                detail_ws.cell(row=title_row, column=grid_start_col - 1).fill = PatternFill("solid", fgColor=trim_colors[trim])
+                detail_ws.cell(row=title_row, column=grid_start_col + 8, value="Avg")
+                detail_ws.cell(row=title_row, column=grid_start_col + 9, value=trim_analysis["overall_average"])
+                detail_ws.cell(row=title_row, column=grid_start_col + 10, value="Size")
+                detail_ws.cell(row=title_row, column=grid_start_col + 11, value=str(trim_analysis["analyzed_size"]))
 
-            data_start_col = grid_start_col
-            data_end_col = grid_start_col + analysis["grid_cols"] - 1
-            data_start_row = grid_header_row + 1
-            data_end_row = grid_header_row + analysis["grid_rows"]
-            data_range = (
-                f"{get_column_letter(data_start_col)}{data_start_row}:"
-                f"{get_column_letter(data_end_col)}{data_end_row}"
-            )
-            detail_ws.conditional_formatting.add(
-                data_range,
-                ColorScaleRule(
-                    start_type="min",
-                    start_color="F8696B",
-                    mid_type="num",
-                    mid_value=0,
-                    mid_color="FFFFFF",
-                    end_type="max",
-                    end_color="63BE7B",
-                ),
-            )
+                detail_ws.cell(row=grid_header_row, column=grid_start_col - 1, value="Row\\Col")
+                for col_idx in range(trim_analysis["grid_cols"]):
+                    detail_ws.cell(row=grid_header_row, column=grid_start_col + col_idx, value=col_idx + 1)
+
+                for row_idx in range(trim_analysis["grid_rows"]):
+                    detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col - 1, value=row_idx + 1)
+                    for col_idx in range(trim_analysis["grid_cols"]):
+                        delta = trim_analysis["cell_deltas"][row_idx][col_idx]
+                        cell = detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col + col_idx, value=delta)
+                        if delta is not None:
+                            cell.number_format = "0.00"
+
+                data_start_col = grid_start_col
+                data_end_col = grid_start_col + trim_analysis["grid_cols"] - 1
+                data_start_row = grid_header_row + 1
+                data_end_row = grid_header_row + trim_analysis["grid_rows"]
+                data_range = (
+                    f"{get_column_letter(data_start_col)}{data_start_row}:"
+                    f"{get_column_letter(data_end_col)}{data_end_row}"
+                )
+                detail_ws.conditional_formatting.add(
+                    data_range,
+                    ColorScaleRule(
+                        start_type="min",
+                        start_color="F8696B",
+                        mid_type="num",
+                        mid_value=0,
+                        mid_color="FFFFFF",
+                        end_type="max",
+                        end_color="63BE7B",
+                    ),
+                )
 
             summary_ws.append(
                 [
@@ -883,16 +985,20 @@ def write_bu_analysis_excel(
                     model_name,
                     measurement.get("judge", ""),
                     measurement.get("black_uniformity", ""),
-                    analysis["overall_average"],
-                    analysis["valid_cells"],
-                    analysis["min_delta"],
-                    analysis["max_delta"],
+                    analyses[0]["overall_average"],
+                    analyses[5]["overall_average"],
+                    analyses[10]["overall_average"],
+                    analyses[15]["overall_average"],
+                    analyses[30]["overall_average"],
+                    analyses[0]["valid_cells"],
+                    analyses[0]["min_delta"],
+                    analyses[0]["max_delta"],
                     f"BU_Grid_전체 row {detail_start_row}",
                     "OK",
                 ]
             )
             analysis_count += 1
-        detail_start_row += 38
+        detail_start_row += 6 + (len(INNER_TRIM_VARIANTS) * (BU_GRID_ROWS + 3)) + 4
 
         if idx == 1 or idx % 5 == 0 or idx == total:
             print_progress("  BU 분석 진행", idx, total, done=(idx == total))
@@ -906,13 +1012,15 @@ def write_bu_analysis_excel(
     summary_ws["M4"] = "밝음=- / 어두움=+"
     summary_ws["L5"] = "비검정 기준"
     summary_ws["M5"] = f"밝기 > threshold({threshold})"
+    summary_ws["L6"] = "비교 trim"
+    summary_ws["M6"] = "0px / 5px / 10px / 15px / 30px"
     for col, width in {
         "A": 24,
         "B": 24,
         "C": 12,
         "D": 12,
-        "E": 16,
-        "F": 12,
+        "E": 14,
+        "F": 14,
         "G": 12,
         "H": 12,
         "I": 24,
@@ -924,12 +1032,14 @@ def write_bu_analysis_excel(
 
     for col in ("A", "D", "L"):
         summary_ws[f"{col}1"].font = Font(bold=True)
-    detail_ws.freeze_panes = "K9"
-    for col in ("A", "B", "C", "D", "E", "F", "G", "H"):
+    detail_ws.freeze_panes = "G9"
+    for row_idx in range(1, detail_start_row):
+        detail_ws.row_dimensions[row_idx].height = DETAIL_ROW_HEIGHT
+    for col in ("A", "B", "C", "D", "E", "F"):
         detail_ws.column_dimensions[col].width = 14
-    detail_ws.column_dimensions["I"].width = 4
-    detail_ws.column_dimensions["J"].width = 4
-    for col_idx in range(11, 11 + BU_GRID_COLS):
+    for col in ("P", "Q", "R"):
+        detail_ws.column_dimensions[col].width = 14
+    for col_idx in range(7, 7 + BU_GRID_COLS):
         detail_ws.column_dimensions[get_column_letter(col_idx)].width = 7
 
     print("\n[8/8] BU 분석 엑셀 저장")
