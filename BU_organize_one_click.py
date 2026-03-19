@@ -6,10 +6,11 @@ from pathlib import Path
 
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
-from openpyxl.formatting.rule import CellIsRule, FormulaRule
-from openpyxl.styles import Font, PatternFill
+from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils import get_column_letter
 from PIL import Image
 
 # 처리 대상 이미지 확장자
@@ -19,6 +20,17 @@ LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
 DATA_FILE_PATTERN = "LMK6DataLog.csv"
 BU_SPEC_MIN = 50.0
 WU_SPEC_MIN = 80.0
+BU_GRID_COLS = 50
+BU_GRID_ROWS = 26
+MODEL_NAME_CANDIDATES = (
+    "Model_Name",
+    "ModelName",
+    "Model",
+    "RecipeName",
+    "Recipe",
+    "Product",
+    "Product_Name",
+)
 
 
 class PipelineCancelled(Exception):
@@ -114,6 +126,14 @@ def format_measurement_value(value: str) -> str:
     return str(value).strip()
 
 
+def extract_model_name(row: dict) -> str:
+    for key in MODEL_NAME_CANDIDATES:
+        value = (row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def to_float(value) -> float | None:
     try:
         if value is None or str(value).strip() == "":
@@ -173,6 +193,7 @@ def collect_latest_measurements(data_root: Path, cancel_check=None) -> tuple[dic
             measured_at = parse_lmk_time(measured_at_raw)
             record = {
                 "lot_id": lot_id,
+                "model_name": extract_model_name(row),
                 "judge": (row.get("Judge") or "").strip(),
                 "black_uniformity": format_measurement_value(row.get("Black_Uniformity")),
                 "white_uniformity": format_measurement_value(row.get("White_Uniformity")),
@@ -189,6 +210,7 @@ def collect_latest_measurements(data_root: Path, cancel_check=None) -> tuple[dic
             rows_for_detail.append(
                 {
                     "lot_id": lot_id,
+                    "model_name": record["model_name"],
                     "judge": record["judge"],
                     "black_uniformity": record["black_uniformity"],
                     "white_uniformity": record["white_uniformity"],
@@ -255,34 +277,83 @@ def build_distribution(values: list[float], bins: list[tuple[str, float, float]]
     return counts
 
 
+def write_card(ws, top_left: str, title: str, value, subtitle: str, fill_color: str) -> None:
+    start_col = ws[top_left].column
+    start_row = ws[top_left].row
+    end_col = start_col + 2
+    end_row = start_row + 2
+    ws.merge_cells(start_row=start_row, start_column=start_col, end_row=end_row, end_column=end_col)
+    cell = ws.cell(row=start_row, column=start_col)
+    cell.value = f"{title}\n{value}\n{subtitle}"
+    cell.fill = PatternFill("solid", fgColor=fill_color)
+    cell.font = Font(color="FFFFFF", bold=True, size=12)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+
+def write_kpi_table(ws, start_row: int, start_col: int, title: str, rows: list[tuple[str, object]]) -> None:
+    ws.cell(row=start_row, column=start_col, value=title)
+    ws.cell(row=start_row, column=start_col).font = Font(size=12, bold=True, color="1F2937")
+    for offset, (label, value) in enumerate(rows, start=1):
+        ws.cell(row=start_row + offset, column=start_col, value=label)
+        ws.cell(row=start_row + offset, column=start_col + 1, value=value)
+        ws.cell(row=start_row + offset, column=start_col).fill = PatternFill("solid", fgColor="F3F4F6")
+        ws.cell(row=start_row + offset, column=start_col).font = Font(bold=True, color="374151")
+
+
+def pick_worst_lotids(latest_measurements: dict[str, dict], key: str, limit: int = 10) -> list[tuple[str, str, float]]:
+    rows = []
+    for lot_id, measurement in latest_measurements.items():
+        value = to_float(measurement.get(key))
+        if value is None:
+            continue
+        rows.append((lot_id, measurement.get("judge", ""), value))
+    rows.sort(key=lambda item: item[2])
+    return rows[:limit]
+
+
 def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) -> None:
     ws = wb.create_sheet("시각화")
-    ws["A1"] = "BU/WU 측정 대시보드"
-    ws["A1"].font = Font(size=16, bold=True)
-    ws["A3"] = "지표"
-    ws["B3"] = "Spec Min"
-    ws["C3"] = "Count"
-    ws["D3"] = "Pass"
-    ws["E3"] = "Fail"
-    ws["F3"] = "Min"
-    ws["G3"] = "Avg"
-    ws["H3"] = "Median"
-    ws["I3"] = "Max"
-
-    header_fill = PatternFill("solid", fgColor="1F2937")
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws["3:3"]:
-        cell.fill = header_fill
-        cell.font = header_font
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells("A1:H2")
+    ws["A1"] = "BU / WU Measurement Dashboard"
+    ws["A1"].font = Font(size=20, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="111827")
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws["I1"] = datetime.now().strftime("Updated: %Y-%m-%d %H:%M:%S")
+    ws["I1"].font = Font(size=10, color="6B7280")
 
     bu_summary = build_metric_summary(latest_measurements, "black_uniformity", BU_SPEC_MIN)
     wu_summary = build_metric_summary(latest_measurements, "white_uniformity", WU_SPEC_MIN)
+    total_count = max(bu_summary["count"], wu_summary["count"])
+
+    write_card(ws, "A4", "전체 LotID", total_count, "최신 측정 기준", "0F766E")
+    write_card(ws, "D4", "BU Fail", bu_summary["fail_count"], f"Spec {BU_SPEC_MIN}", "B91C1C")
+    write_card(ws, "G4", "WU Fail", wu_summary["fail_count"], f"Spec {WU_SPEC_MIN}", "7C2D12")
+    write_card(ws, "J4", "Pass Rate", f"{(0 if total_count == 0 else ((bu_summary['pass_count'] + wu_summary['pass_count']) / max(1, bu_summary['count'] + wu_summary['count']) * 100)):.1f}%", "BU+WU combined", "1D4ED8")
+
+    ws["A8"] = "Metric Summary"
+    ws["A8"].font = Font(size=13, bold=True, color="111827")
+    ws["A9"] = "지표"
+    ws["B9"] = "Spec Min"
+    ws["C9"] = "Count"
+    ws["D9"] = "Pass"
+    ws["E9"] = "Fail"
+    ws["F9"] = "Min"
+    ws["G9"] = "Avg"
+    ws["H9"] = "Median"
+    ws["I9"] = "Max"
+
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws["9:9"]:
+        cell.fill = header_fill
+        cell.font = header_font
 
     metric_rows = [
         ("Black Uniformity", BU_SPEC_MIN, bu_summary),
         ("White Uniformity", WU_SPEC_MIN, wu_summary),
     ]
-    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=4):
+    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=10):
         ws.cell(row=row_idx, column=1, value=label)
         ws.cell(row=row_idx, column=2, value=spec_min)
         ws.cell(row=row_idx, column=3, value=summary["count"])
@@ -294,18 +365,18 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
         ws.cell(row=row_idx, column=9, value=summary["max"])
 
     # 정렬 추세 차트용 데이터
-    ws["K2"] = "BU_index"
-    ws["L2"] = "BU_value"
-    ws["M2"] = "BU_spec"
-    for idx, value in enumerate(bu_summary["sorted_values"], start=3):
+    ws["K9"] = "BU_index"
+    ws["L9"] = "BU_value"
+    ws["M9"] = "BU_spec"
+    for idx, value in enumerate(bu_summary["sorted_values"], start=10):
         ws.cell(row=idx, column=11, value=idx - 2)
         ws.cell(row=idx, column=12, value=value)
         ws.cell(row=idx, column=13, value=BU_SPEC_MIN)
 
-    ws["O2"] = "WU_index"
-    ws["P2"] = "WU_value"
-    ws["Q2"] = "WU_spec"
-    for idx, value in enumerate(wu_summary["sorted_values"], start=3):
+    ws["O9"] = "WU_index"
+    ws["P9"] = "WU_value"
+    ws["Q9"] = "WU_spec"
+    for idx, value in enumerate(wu_summary["sorted_values"], start=10):
         ws.cell(row=idx, column=15, value=idx - 2)
         ws.cell(row=idx, column=16, value=value)
         ws.cell(row=idx, column=17, value=WU_SPEC_MIN)
@@ -314,56 +385,56 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_line.title = "BU 분포 추세"
     bu_line.y_axis.title = "Black Uniformity"
     bu_line.x_axis.title = "정렬 순서"
-    bu_data = Reference(ws, min_col=12, max_col=13, min_row=2, max_row=max(3, len(bu_summary["sorted_values"]) + 2))
-    bu_cats = Reference(ws, min_col=11, min_row=3, max_row=max(3, len(bu_summary["sorted_values"]) + 2))
+    bu_data = Reference(ws, min_col=12, max_col=13, min_row=9, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
+    bu_cats = Reference(ws, min_col=11, min_row=10, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
     bu_line.add_data(bu_data, titles_from_data=True)
     bu_line.set_categories(bu_cats)
     bu_line.height = 7
     bu_line.width = 13
-    ws.add_chart(bu_line, "A8")
+    ws.add_chart(bu_line, "A14")
 
     wu_line = LineChart()
     wu_line.title = "WU 분포 추세"
     wu_line.y_axis.title = "White Uniformity"
     wu_line.x_axis.title = "정렬 순서"
-    wu_data = Reference(ws, min_col=16, max_col=17, min_row=2, max_row=max(3, len(wu_summary["sorted_values"]) + 2))
-    wu_cats = Reference(ws, min_col=15, min_row=3, max_row=max(3, len(wu_summary["sorted_values"]) + 2))
+    wu_data = Reference(ws, min_col=16, max_col=17, min_row=9, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
+    wu_cats = Reference(ws, min_col=15, min_row=10, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
     wu_line.add_data(wu_data, titles_from_data=True)
     wu_line.set_categories(wu_cats)
     wu_line.height = 7
     wu_line.width = 13
-    ws.add_chart(wu_line, "N8")
+    ws.add_chart(wu_line, "N14")
 
     # Pass/Fail 파이 차트
-    ws["A24"] = "Metric"
-    ws["B24"] = "Pass"
-    ws["C24"] = "Fail"
-    ws["A25"] = "BU"
-    ws["B25"] = bu_summary["pass_count"]
-    ws["C25"] = bu_summary["fail_count"]
-    ws["A26"] = "WU"
-    ws["B26"] = wu_summary["pass_count"]
-    ws["C26"] = wu_summary["fail_count"]
+    ws["A31"] = "Metric"
+    ws["B31"] = "Pass"
+    ws["C31"] = "Fail"
+    ws["A32"] = "BU"
+    ws["B32"] = bu_summary["pass_count"]
+    ws["C32"] = bu_summary["fail_count"]
+    ws["A33"] = "WU"
+    ws["B33"] = wu_summary["pass_count"]
+    ws["C33"] = wu_summary["fail_count"]
 
     bu_pie = PieChart()
     bu_pie.title = "BU Pass/Fail"
-    bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=25, max_row=25), from_rows=True)
-    bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=24, max_row=24))
+    bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=32, max_row=32), from_rows=True)
+    bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
     bu_pie.height = 6
     bu_pie.width = 8
     bu_pie.dataLabels = DataLabelList()
     bu_pie.dataLabels.showPercent = True
-    ws.add_chart(bu_pie, "A28")
+    ws.add_chart(bu_pie, "A35")
 
     wu_pie = PieChart()
     wu_pie.title = "WU Pass/Fail"
-    wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=26, max_row=26), from_rows=True)
-    wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=24, max_row=24))
+    wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=33, max_row=33), from_rows=True)
+    wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
     wu_pie.height = 6
     wu_pie.width = 8
     wu_pie.dataLabels = DataLabelList()
     wu_pie.dataLabels.showPercent = True
-    ws.add_chart(wu_pie, "J28")
+    ws.add_chart(wu_pie, "J35")
 
     # Spec 기준 중심 버킷 분포
     bu_bins = [
@@ -385,15 +456,15 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_distribution = build_distribution(bu_summary["sorted_values"], bu_bins)
     wu_distribution = build_distribution(wu_summary["sorted_values"], wu_bins)
 
-    ws["S2"] = "BU_bucket"
-    ws["T2"] = "BU_count"
-    for idx, (label, count) in enumerate(bu_distribution, start=3):
+    ws["S9"] = "BU_bucket"
+    ws["T9"] = "BU_count"
+    for idx, (label, count) in enumerate(bu_distribution, start=10):
         ws.cell(row=idx, column=19, value=label)
         ws.cell(row=idx, column=20, value=count)
 
-    ws["V2"] = "WU_bucket"
-    ws["W2"] = "WU_count"
-    for idx, (label, count) in enumerate(wu_distribution, start=3):
+    ws["V9"] = "WU_bucket"
+    ws["W9"] = "WU_count"
+    for idx, (label, count) in enumerate(wu_distribution, start=10):
         ws.cell(row=idx, column=22, value=label)
         ws.cell(row=idx, column=23, value=count)
 
@@ -401,24 +472,39 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_bar.title = "BU 분포 구간"
     bu_bar.y_axis.title = "Count"
     bu_bar.x_axis.title = "Range"
-    bu_bar.add_data(Reference(ws, min_col=20, min_row=2, max_row=2 + len(bu_distribution)), titles_from_data=True)
-    bu_bar.set_categories(Reference(ws, min_col=19, min_row=3, max_row=2 + len(bu_distribution)))
+    bu_bar.add_data(Reference(ws, min_col=20, min_row=9, max_row=9 + len(bu_distribution)), titles_from_data=True)
+    bu_bar.set_categories(Reference(ws, min_col=19, min_row=10, max_row=9 + len(bu_distribution)))
     bu_bar.height = 7
     bu_bar.width = 11
-    ws.add_chart(bu_bar, "T8")
+    ws.add_chart(bu_bar, "T14")
 
     wu_bar = BarChart()
     wu_bar.title = "WU 분포 구간"
     wu_bar.y_axis.title = "Count"
     wu_bar.x_axis.title = "Range"
-    wu_bar.add_data(Reference(ws, min_col=23, min_row=2, max_row=2 + len(wu_distribution)), titles_from_data=True)
-    wu_bar.set_categories(Reference(ws, min_col=22, min_row=3, max_row=2 + len(wu_distribution)))
+    wu_bar.add_data(Reference(ws, min_col=23, min_row=9, max_row=9 + len(wu_distribution)), titles_from_data=True)
+    wu_bar.set_categories(Reference(ws, min_col=22, min_row=10, max_row=9 + len(wu_distribution)))
     wu_bar.height = 7
     wu_bar.width = 11
-    ws.add_chart(wu_bar, "T28")
+    ws.add_chart(wu_bar, "T35")
+
+    write_kpi_table(
+        ws,
+        31,
+        20,
+        "Worst BU LotID",
+        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "black_uniformity")],
+    )
+    write_kpi_table(
+        ws,
+        31,
+        23,
+        "Worst WU LotID",
+        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "white_uniformity")],
+    )
 
     ws.column_dimensions["A"].width = 22
-    for col in ("B", "C", "D", "E", "F", "G", "H", "I"):
+    for col in ("B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "S", "T", "V", "W"):
         ws.column_dimensions[col].width = 12
 
 
@@ -549,6 +635,307 @@ def parse_lot_kind(stem: str):
     if not m:
         return stem, "UNKNOWN"
     return m.group("lotid"), m.group("kind").upper()
+
+
+def compute_luminance(rgb) -> float:
+    r, g, b = rgb[:3]
+    return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+
+
+def build_safe_sheet_name(base_name: str, used_names: set[str]) -> str:
+    cleaned = re.sub(r"[\\/*?:\[\]]", "_", base_name).strip() or "Sheet"
+    candidate = cleaned[:31]
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+
+    idx = 1
+    while True:
+        suffix = f"_{idx}"
+        candidate = f"{cleaned[:31 - len(suffix)]}{suffix}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        idx += 1
+
+
+def analyze_bu_grid(image_path: Path, threshold: int, grid_cols: int = BU_GRID_COLS, grid_rows: int = BU_GRID_ROWS) -> dict:
+    with Image.open(image_path) as img:
+        rgb_img = img.convert("RGB")
+        width, height = rgb_img.size
+        px = rgb_img.load()
+
+        valid_pixels = []
+        for y in range(height):
+            for x in range(width):
+                luminance = compute_luminance(px[x, y])
+                if luminance > threshold:
+                    valid_pixels.append(luminance)
+
+        if not valid_pixels:
+            return {
+                "overall_average": None,
+                "grid_rows": grid_rows,
+                "grid_cols": grid_cols,
+                "cell_deltas": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "cell_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "valid_cells": 0,
+                "valid_pixels": 0,
+                "min_delta": None,
+                "max_delta": None,
+            }
+
+        overall_average = sum(valid_pixels) / len(valid_pixels)
+        x_edges = [round(i * width / grid_cols) for i in range(grid_cols + 1)]
+        y_edges = [round(i * height / grid_rows) for i in range(grid_rows + 1)]
+
+        cell_averages = []
+        cell_deltas = []
+        valid_cells = 0
+        delta_values = []
+
+        for row_idx in range(grid_rows):
+            avg_row = []
+            delta_row = []
+            top = y_edges[row_idx]
+            bottom = y_edges[row_idx + 1]
+            for col_idx in range(grid_cols):
+                left = x_edges[col_idx]
+                right = x_edges[col_idx + 1]
+                cell_values = []
+                for y in range(top, bottom):
+                    for x in range(left, right):
+                        luminance = compute_luminance(px[x, y])
+                        if luminance > threshold:
+                            cell_values.append(luminance)
+
+                if cell_values:
+                    cell_average = sum(cell_values) / len(cell_values)
+                    delta = overall_average - cell_average
+                    valid_cells += 1
+                    delta_values.append(delta)
+                else:
+                    cell_average = None
+                    delta = None
+
+                avg_row.append(cell_average)
+                delta_row.append(delta)
+
+            cell_averages.append(avg_row)
+            cell_deltas.append(delta_row)
+
+        return {
+            "overall_average": overall_average,
+            "grid_rows": grid_rows,
+            "grid_cols": grid_cols,
+            "cell_deltas": cell_deltas,
+            "cell_averages": cell_averages,
+            "valid_cells": valid_cells,
+            "valid_pixels": len(valid_pixels),
+            "min_delta": min(delta_values) if delta_values else None,
+            "max_delta": max(delta_values) if delta_values else None,
+        }
+
+
+def write_bu_analysis_excel(
+    records,
+    latest_measurements: dict[str, dict],
+    analysis_excel_path: Path,
+    threshold: int,
+    cancel_check=None,
+) -> int:
+    wb = Workbook()
+    summary_ws = wb.active
+    summary_ws.title = "요약"
+    summary_ws.sheet_view.showGridLines = False
+    summary_ws.append(
+        [
+            "LotID",
+            "ModelName",
+            "판정",
+            "BU data",
+            "전체평균밝기",
+            "유효셀수",
+            "최소편차",
+            "최대편차",
+            "분석시트명",
+            "분석상태",
+        ]
+    )
+    detail_ws = wb.create_sheet("BU_Grid_전체")
+    detail_ws.sheet_view.showGridLines = False
+    detail_ws["A1"] = "BU Grid Analysis"
+    detail_ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+    detail_ws["A1"].fill = PatternFill("solid", fgColor="111827")
+    detail_ws["A2"] = "크롭 기준"
+    detail_ws["B2"] = "검은색 제외 영역의 최소 사각형(BBox)을 찾은 뒤, 사용자 입력 padding을 더해 크롭"
+    detail_ws["A3"] = "Grid 기준"
+    detail_ws["B3"] = f"크롭된 BU 이미지를 {BU_GRID_COLS} x {BU_GRID_ROWS} 영역으로 분할"
+    detail_ws["A4"] = "편차 계산식"
+    detail_ws["B4"] = "편차 = 전체평균밝기 - 셀평균밝기, 밝음=- / 어두움=+"
+    detail_ws["A5"] = "비검정 기준"
+    detail_ws["B5"] = f"밝기 > threshold({threshold}) 인 픽셀만 사용"
+
+    bu_records = [
+        rec for rec in records
+        if rec.get("kind") == "BU" and rec.get("dst") is not None and str(rec.get("status", "")).startswith("OK")
+    ]
+    total = len(bu_records)
+    print(f"\n[7/8] BU 영역 분석 시작 (대상: {total}개)")
+
+    analysis_count = 0
+    detail_start_row = 8
+
+    for idx, rec in enumerate(sorted(bu_records, key=lambda item: item["lot_id"]), start=1):
+        ensure_not_cancelled(cancel_check)
+        lot_id = rec["lot_id"]
+        measurement = latest_measurements.get(lot_id, {})
+        model_name = measurement.get("model_name", "")
+
+        analysis = analyze_bu_grid(Path(rec["dst"]), threshold)
+        if analysis["overall_average"] is None:
+            summary_ws.append(
+                [
+                    lot_id,
+                    model_name,
+                    measurement.get("judge", ""),
+                    measurement.get("black_uniformity", ""),
+                    "",
+                    0,
+                    "",
+                    "",
+                    f"row {detail_start_row}",
+                    "NO_VALID_PIXEL",
+                ]
+            )
+        else:
+            detail_ws.merge_cells(start_row=detail_start_row, start_column=1, end_row=detail_start_row, end_column=8)
+            detail_ws.cell(row=detail_start_row, column=1, value=f"{lot_id} | {model_name or 'Model N/A'}")
+            detail_ws.cell(row=detail_start_row, column=1).font = Font(size=14, bold=True, color="FFFFFF")
+            detail_ws.cell(row=detail_start_row, column=1).fill = PatternFill("solid", fgColor="1F2937")
+
+            detail_ws.cell(row=detail_start_row + 1, column=1, value="LotID")
+            detail_ws.cell(row=detail_start_row + 1, column=2, value=lot_id)
+            detail_ws.cell(row=detail_start_row + 2, column=1, value="ModelName")
+            detail_ws.cell(row=detail_start_row + 2, column=2, value=model_name)
+            detail_ws.cell(row=detail_start_row + 3, column=1, value="판정")
+            detail_ws.cell(row=detail_start_row + 3, column=2, value=measurement.get("judge", ""))
+            detail_ws.cell(row=detail_start_row + 4, column=1, value="BU data")
+            detail_ws.cell(row=detail_start_row + 4, column=2, value=measurement.get("black_uniformity", ""))
+            detail_ws.cell(row=detail_start_row + 1, column=4, value="전체평균밝기")
+            detail_ws.cell(row=detail_start_row + 1, column=5, value=analysis["overall_average"])
+            detail_ws.cell(row=detail_start_row + 2, column=4, value="유효셀수")
+            detail_ws.cell(row=detail_start_row + 2, column=5, value=analysis["valid_cells"])
+            detail_ws.cell(row=detail_start_row + 3, column=4, value="크롭 BBox")
+            detail_ws.cell(row=detail_start_row + 3, column=5, value=str(rec.get("bbox", "")))
+            detail_ws.cell(row=detail_start_row + 4, column=4, value="설명")
+            detail_ws.cell(row=detail_start_row + 4, column=5, value="음수=더 밝음 / 양수=더 어두움")
+
+            if Path(rec["dst"]).exists():
+                bu_img = XLImage(str(rec["dst"]))
+                if bu_img.width > 280:
+                    ratio = 280 / bu_img.width
+                    bu_img.width = int(bu_img.width * ratio)
+                    bu_img.height = int(bu_img.height * ratio)
+                detail_ws.add_image(bu_img, f"A{detail_start_row + 6}")
+                image_height = max(12, int(bu_img.height * 0.75))
+                for image_row in range(detail_start_row + 6, detail_start_row + 20):
+                    detail_ws.row_dimensions[image_row].height = image_height / 14
+
+            grid_header_row = detail_start_row + 6
+            grid_start_col = 11
+            detail_ws.cell(row=grid_header_row, column=grid_start_col - 1, value="Row\\Col")
+            for col_idx in range(analysis["grid_cols"]):
+                detail_ws.cell(row=grid_header_row, column=grid_start_col + col_idx, value=col_idx + 1)
+
+            for row_idx in range(analysis["grid_rows"]):
+                detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col - 1, value=row_idx + 1)
+                for col_idx in range(analysis["grid_cols"]):
+                    delta = analysis["cell_deltas"][row_idx][col_idx]
+                    cell = detail_ws.cell(row=grid_header_row + 1 + row_idx, column=grid_start_col + col_idx, value=delta)
+                    if delta is not None:
+                        cell.number_format = "0.00"
+
+            data_start_col = grid_start_col
+            data_end_col = grid_start_col + analysis["grid_cols"] - 1
+            data_start_row = grid_header_row + 1
+            data_end_row = grid_header_row + analysis["grid_rows"]
+            data_range = (
+                f"{get_column_letter(data_start_col)}{data_start_row}:"
+                f"{get_column_letter(data_end_col)}{data_end_row}"
+            )
+            detail_ws.conditional_formatting.add(
+                data_range,
+                ColorScaleRule(
+                    start_type="min",
+                    start_color="F8696B",
+                    mid_type="num",
+                    mid_value=0,
+                    mid_color="FFFFFF",
+                    end_type="max",
+                    end_color="63BE7B",
+                ),
+            )
+
+            summary_ws.append(
+                [
+                    lot_id,
+                    model_name,
+                    measurement.get("judge", ""),
+                    measurement.get("black_uniformity", ""),
+                    analysis["overall_average"],
+                    analysis["valid_cells"],
+                    analysis["min_delta"],
+                    analysis["max_delta"],
+                    f"BU_Grid_전체 row {detail_start_row}",
+                    "OK",
+                ]
+            )
+            analysis_count += 1
+        detail_start_row += 38
+
+        if idx == 1 or idx % 5 == 0 or idx == total:
+            print_progress("  BU 분석 진행", idx, total, done=(idx == total))
+
+    summary_ws.freeze_panes = "A2"
+    summary_ws["L2"] = "크롭 기준"
+    summary_ws["M2"] = "검은색 제외 영역의 최소 사각형(BBox) + padding"
+    summary_ws["L3"] = "Grid 기준"
+    summary_ws["M3"] = f"{BU_GRID_COLS} x {BU_GRID_ROWS}"
+    summary_ws["L4"] = "편차 부호"
+    summary_ws["M4"] = "밝음=- / 어두움=+"
+    summary_ws["L5"] = "비검정 기준"
+    summary_ws["M5"] = f"밝기 > threshold({threshold})"
+    for col, width in {
+        "A": 24,
+        "B": 24,
+        "C": 12,
+        "D": 12,
+        "E": 16,
+        "F": 12,
+        "G": 12,
+        "H": 12,
+        "I": 24,
+        "J": 16,
+        "L": 16,
+        "M": 44,
+    }.items():
+        summary_ws.column_dimensions[col].width = width
+
+    for col in ("A", "D", "L"):
+        summary_ws[f"{col}1"].font = Font(bold=True)
+    detail_ws.freeze_panes = "K9"
+    for col in ("A", "B", "C", "D", "E", "F", "G", "H"):
+        detail_ws.column_dimensions[col].width = 14
+    detail_ws.column_dimensions["I"].width = 4
+    detail_ws.column_dimensions["J"].width = 4
+    for col_idx in range(11, 11 + BU_GRID_COLS):
+        detail_ws.column_dimensions[get_column_letter(col_idx)].width = 7
+
+    print("\n[8/8] BU 분석 엑셀 저장")
+    wb.save(analysis_excel_path)
+    print("  BU 분석 엑셀 저장 완료")
+    return analysis_count
 
 
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int, cancel_check=None):
@@ -780,9 +1167,9 @@ def write_excel(
     detail_ws.column_dimensions["G"].width = 60
     detail_ws.column_dimensions["H"].width = 44
     add_visualization_sheet(wb, latest_measurements or {})
-    print("\n[7/7] 엑셀 저장")
+    print("\n메인 엑셀 저장")
     wb.save(excel_path)
-    print("  엑셀 저장 완료")
+    print("  메인 엑셀 저장 완료")
 
 
 def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int, cancel_check=None) -> dict:
@@ -790,12 +1177,14 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
     merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
     excel_path = cropped_root / "crop_report.xlsx"
+    bu_analysis_excel_path = cropped_root / "bu_grid_analysis.xlsx"
 
     print(f"\n📌 원본 통합 폴더: {integrated_root}")
     print(f"📌 측정 데이터 폴더: {data_root}")
     print(f"📌 정리 폴더(merge): {merged_root}")
     print(f"📌 크롭 폴더: {cropped_root}")
     print(f"📌 엑셀 리포트: {excel_path}")
+    print(f"📌 BU 분석 엑셀: {bu_analysis_excel_path}")
     print(f"📌 임계값: {threshold}, 패딩: {padding}")
 
     ensure_not_cancelled(cancel_check)
@@ -817,6 +1206,13 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
         measurement_rows=measurement_rows,
         cancel_check=cancel_check,
     )
+    bu_analysis_count = write_bu_analysis_excel(
+        crop_records,
+        latest_measurements,
+        bu_analysis_excel_path,
+        threshold,
+        cancel_check=cancel_check,
+    )
 
     duplicate_count = len(merge_rows) - len(latest_by_lotid)
     ok_count = sum(1 for r in crop_records if r["status"] == "OK")
@@ -834,12 +1230,15 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
     print(f"Crop 오류: {error_count}")
     print(f"Merge 리포트: {merge_report_path}")
     print(f"Crop 엑셀: {excel_path}")
+    print(f"BU 분석 엑셀: {bu_analysis_excel_path}")
+    print(f"BU 분석 완료 LotID 수: {bu_analysis_count}")
     print("완료!")
 
     return {
         "merged_root": merged_root,
         "cropped_root": cropped_root,
         "excel_path": excel_path,
+        "bu_analysis_excel_path": bu_analysis_excel_path,
         "merge_report_path": merge_report_path,
         "merge_rows": len(merge_rows),
         "latest_lotids": len(latest_by_lotid),
@@ -848,6 +1247,7 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
         "crop_ok": ok_count,
         "crop_nodetect": nodetect_count,
         "crop_error": error_count,
+        "bu_analysis_count": bu_analysis_count,
     }
 
 

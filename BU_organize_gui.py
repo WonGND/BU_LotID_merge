@@ -1,13 +1,19 @@
 import io
 import os
 import queue
+import sys
 import threading
-import tkinter as tk
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
+
+if getattr(sys, "frozen", False):
+    bundled_base = Path(getattr(sys, "_MEIPASS", ""))
+    if bundled_base and (bundled_base / "tkinter").exists():
+        sys.path.insert(0, str(bundled_base))
+
+import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import sys
 
 from BU_organize_one_click import PipelineCancelled, run_pipeline
 
@@ -270,8 +276,12 @@ class BUOrganizeApp:
         self.run_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.status_var.set("완료")
-        self.result_var.set(str(result["excel_path"]))
-        self._append_log(f"\n완료: {result['excel_path']}\n")
+        self.result_var.set(
+            f"메인 엑셀: {result['excel_path']}\nBU 분석 엑셀: {result.get('bu_analysis_excel_path', '')}"
+        )
+        self._append_log(
+            f"\n완료: {result['excel_path']}\nBU 분석 엑셀: {result.get('bu_analysis_excel_path', '')}\n"
+        )
         should_open = messagebox.askyesno("완료", "작업이 완료되었습니다.\n결과 엑셀 파일을 바로 열까요?")
         if should_open:
             self._open_result(result["excel_path"])
