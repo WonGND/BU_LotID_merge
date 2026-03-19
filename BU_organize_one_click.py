@@ -23,7 +23,7 @@ WU_SPEC_MIN = 80.0
 BU_GRID_COLS = 48
 BU_GRID_ROWS = 27
 DETAIL_ROW_HEIGHT = 22
-INNER_TRIM_VARIANTS = (0, 5, 10, 15, 30)
+INNER_TRIM_VARIANTS = (5,)
 MODEL_NAME_CANDIDATES = (
     "Model_Name",
     "ModelName",
@@ -824,14 +824,10 @@ def write_bu_analysis_excel(
             "ModelName",
             "판정",
             "BU data",
-            "BaseAvg(0px)",
             "Trim5Avg",
-            "Trim10Avg",
-            "Trim15Avg",
-            "Trim30Avg",
-            "유효셀수(0px)",
-            "최소편차(0px)",
-            "최대편차(0px)",
+            "유효셀수(5px)",
+            "최소편차(5px)",
+            "최대편차(5px)",
             "분석위치",
             "분석상태",
         ]
@@ -850,7 +846,7 @@ def write_bu_analysis_excel(
     detail_ws["A5"] = "비검정 기준"
     detail_ws["B5"] = f"밝기 > threshold({threshold}) 인 픽셀만 사용"
     detail_ws["A6"] = "추가 내부 축소"
-    detail_ws["B6"] = "0px / 5px / 10px / 15px / 30px를 각각 비교"
+    detail_ws["B6"] = "5px 내부 축소 기준으로만 계산"
 
     bu_records = [
         rec for rec in records
@@ -872,7 +868,7 @@ def write_bu_analysis_excel(
             trim: analyze_bu_grid(Path(rec["dst"]), threshold, inner_trim=trim)
             for trim in INNER_TRIM_VARIANTS
         }
-        analysis = analyses[0]
+        analysis = analyses[5]
         if analysis["overall_average"] is None:
             summary_ws.append(
                 [
@@ -880,9 +876,6 @@ def write_bu_analysis_excel(
                     model_name,
                     measurement.get("judge", ""),
                     measurement.get("black_uniformity", ""),
-                    "",
-                    "",
-                    "",
                     "",
                     0,
                     "",
@@ -914,7 +907,7 @@ def write_bu_analysis_excel(
             detail_ws.cell(row=detail_start_row + 4, column=4, value="설명")
             detail_ws.cell(row=detail_start_row + 4, column=5, value="음수=더 밝음 / 양수=더 어두움")
             detail_ws.cell(row=detail_start_row + 5, column=4, value="비교 trim")
-            detail_ws.cell(row=detail_start_row + 5, column=5, value="0px / 5px / 10px / 15px / 30px")
+            detail_ws.cell(row=detail_start_row + 5, column=5, value="5px")
 
             if Path(rec["dst"]).exists():
                 bu_img = XLImage(str(rec["dst"]))
@@ -926,7 +919,7 @@ def write_bu_analysis_excel(
 
             section_top_row = detail_start_row + 6
             grid_start_col = 7
-            trim_colors = {0: "1D4ED8", 5: "0F766E", 10: "7C3AED", 15: "B45309", 30: "BE123C"}
+            trim_colors = {5: "0F766E"}
             for trim_index, trim in enumerate(INNER_TRIM_VARIANTS):
                 trim_analysis = analyses[trim]
                 title_row = section_top_row + trim_index * (BU_GRID_ROWS + 3)
@@ -985,14 +978,10 @@ def write_bu_analysis_excel(
                     model_name,
                     measurement.get("judge", ""),
                     measurement.get("black_uniformity", ""),
-                    analyses[0]["overall_average"],
                     analyses[5]["overall_average"],
-                    analyses[10]["overall_average"],
-                    analyses[15]["overall_average"],
-                    analyses[30]["overall_average"],
-                    analyses[0]["valid_cells"],
-                    analyses[0]["min_delta"],
-                    analyses[0]["max_delta"],
+                    analyses[5]["valid_cells"],
+                    analyses[5]["min_delta"],
+                    analyses[5]["max_delta"],
                     f"BU_Grid_전체 row {detail_start_row}",
                     "OK",
                 ]
@@ -1013,18 +1002,17 @@ def write_bu_analysis_excel(
     summary_ws["L5"] = "비검정 기준"
     summary_ws["M5"] = f"밝기 > threshold({threshold})"
     summary_ws["L6"] = "비교 trim"
-    summary_ws["M6"] = "0px / 5px / 10px / 15px / 30px"
+    summary_ws["M6"] = "5px"
     for col, width in {
         "A": 24,
         "B": 24,
         "C": 12,
         "D": 12,
         "E": 14,
-        "F": 14,
+        "F": 12,
         "G": 12,
-        "H": 12,
-        "I": 24,
-        "J": 16,
+        "H": 24,
+        "I": 16,
         "L": 16,
         "M": 44,
     }.items():
