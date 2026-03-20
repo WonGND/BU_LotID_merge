@@ -4,6 +4,12 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+import matplotlib
+import numpy as np
+import pandas as pd
+import seaborn as sns
+matplotlib.use("Agg")
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
 from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule
@@ -11,6 +17,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
+from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
 from PIL import Image, ImageDraw
 
 # 처리 대상 이미지 확장자
@@ -24,6 +32,12 @@ BU_GRID_COLS = 48
 BU_GRID_ROWS = 27
 DETAIL_ROW_HEIGHT = 22
 INNER_TRIM_VARIANTS = (5,)
+WORST_POINT_EDGE_MARGIN_CELLS_X = 2
+WORST_POINT_EDGE_MARGIN_CELLS_Y = 2
+PRODUCT_CELL_CONTENT_RATIO_MIN = 0.7
+PRODUCT_ROW_COVERAGE_MIN = 0.08
+PRODUCT_COL_COVERAGE_MIN = 0.08
+PRODUCT_BOUND_EXPAND_CELLS = 1
 MODEL_NAME_CANDIDATES = (
     "Model_Name",
     "ModelName",
@@ -649,6 +663,46 @@ def find_non_black_bbox(img: Image.Image, threshold: int = 12):
     return min_x, min_y, max_x + 1, max_y + 1
 
 
+def load_cv2_image(image_path: Path):
+    data = np.fromfile(str(image_path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def get_refined_product_bbox(image_path: Path, margin_px: int = 10):
+    img = load_cv2_image(image_path)
+    if img is None:
+        return None
+
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower_bound = np.array([0, 50, 50], dtype=np.uint8)
+    upper_bound = np.array([180, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower_bound, upper_bound)
+
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    max_cnt = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(max_cnt)
+    x_new = max(0, x + margin_px)
+    y_new = max(0, y + margin_px)
+    w_new = max(1, w - (margin_px * 2))
+    h_new = max(1, h - (margin_px * 2))
+
+    return (
+        x_new,
+        y_new,
+        min(img.shape[1], x_new + w_new),
+        min(img.shape[0], y_new + h_new),
+    )
+
+
 def add_padding(box, w: int, h: int, pad: int):
     # 잘림 방지를 위해 크롭 박스에 여백(padding) 추가
     left, top, right, bottom = box
@@ -674,6 +728,15 @@ def compute_luminance(rgb) -> float:
     return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
 
 
+def compute_red_white_score(rgb) -> float:
+    r, g, b = rgb[:3]
+    brightness = compute_luminance(rgb) / 255.0
+    redness = max(0.0, r - max(g, b)) / 255.0
+    whiteness = (min(r, g, b) / 255.0) * brightness
+    green_penalty = max(0.0, g - r) / 255.0
+    return (redness * 2.2) + (whiteness * 1.4) + (brightness * 0.2) - (green_penalty * 1.0)
+
+
 def build_safe_sheet_name(base_name: str, used_names: set[str]) -> str:
     cleaned = re.sub(r"[\\/*?:\[\]]", "_", base_name).strip() or "Sheet"
     candidate = cleaned[:31]
@@ -697,9 +760,38 @@ def analyze_bu_grid(
     grid_cols: int = BU_GRID_COLS,
     grid_rows: int = BU_GRID_ROWS,
     inner_trim: int = 0,
+    crop_box: tuple[int, int, int, int] | None = None,
+    analysis_label: str = "",
 ) -> dict:
     with Image.open(image_path) as img:
         rgb_img = img.convert("RGB")
+        source_box = (0, 0, rgb_img.width, rgb_img.height)
+        if crop_box is not None:
+            left, top, right, bottom = crop_box
+            if right <= left or bottom <= top:
+                return {
+                    "overall_average": None,
+                    "grid_rows": grid_rows,
+                    "grid_cols": grid_cols,
+                    "cell_deltas": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_rgb_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_has_content": [[False for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_content_ratio": [[0.0 for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_red_white_scores": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "valid_cells": 0,
+                    "valid_pixels": 0,
+                    "min_delta": None,
+                    "max_delta": None,
+                    "inner_trim": inner_trim,
+                    "analyzed_size": (0, 0),
+                    "x_edges": [0 for _ in range(grid_cols + 1)],
+                    "y_edges": [0 for _ in range(grid_rows + 1)],
+                    "source_box": crop_box,
+                    "analysis_label": analysis_label,
+                }
+            rgb_img = rgb_img.crop((left, top, right, bottom))
+            source_box = crop_box
         if inner_trim > 0:
             width, height = rgb_img.size
             left = inner_trim
@@ -713,14 +805,28 @@ def analyze_bu_grid(
                     "grid_cols": grid_cols,
                     "cell_deltas": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
                     "cell_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_rgb_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
                     "valid_cells": 0,
                     "valid_pixels": 0,
                     "min_delta": None,
                     "max_delta": None,
                     "inner_trim": inner_trim,
                     "analyzed_size": (0, 0),
+                    "cell_has_content": [[False for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_content_ratio": [[0.0 for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "cell_red_white_scores": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                    "x_edges": [0 for _ in range(grid_cols + 1)],
+                    "y_edges": [0 for _ in range(grid_rows + 1)],
+                    "source_box": source_box,
+                    "analysis_label": analysis_label,
                 }
             rgb_img = rgb_img.crop((left, top, right, bottom))
+            source_box = (
+                source_box[0] + left,
+                source_box[1] + top,
+                source_box[0] + right,
+                source_box[1] + bottom,
+            )
         width, height = rgb_img.size
         px = rgb_img.load()
 
@@ -738,12 +844,20 @@ def analyze_bu_grid(
                 "grid_cols": grid_cols,
                 "cell_deltas": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
                 "cell_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "cell_rgb_averages": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "cell_has_content": [[False for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "cell_content_ratio": [[0.0 for _ in range(grid_cols)] for _ in range(grid_rows)],
+                "cell_red_white_scores": [[None for _ in range(grid_cols)] for _ in range(grid_rows)],
                 "valid_cells": 0,
                 "valid_pixels": 0,
                 "min_delta": None,
                 "max_delta": None,
                 "inner_trim": inner_trim,
                 "analyzed_size": (width, height),
+                "x_edges": [0 for _ in range(grid_cols + 1)],
+                "y_edges": [0 for _ in range(grid_rows + 1)],
+                "source_box": source_box,
+                "analysis_label": analysis_label,
             }
 
         overall_average = sum(valid_pixels) / len(valid_pixels)
@@ -751,13 +865,21 @@ def analyze_bu_grid(
         y_edges = [round(i * height / grid_rows) for i in range(grid_rows + 1)]
 
         cell_averages = []
+        cell_rgb_averages = []
         cell_deltas = []
+        cell_has_content = []
+        cell_content_ratio = []
+        cell_red_white_scores = []
         valid_cells = 0
         delta_values = []
 
         for row_idx in range(grid_rows):
             avg_row = []
+            rgb_row = []
             delta_row = []
+            content_row = []
+            ratio_row = []
+            score_row = []
             top = y_edges[row_idx]
             bottom = y_edges[row_idx + 1]
             for col_idx in range(grid_cols):
@@ -765,18 +887,25 @@ def analyze_bu_grid(
                 right = x_edges[col_idx + 1]
                 cell_values = []
                 fallback_values = []
+                cell_pixels = []
+                valid_rgb_pixels = []
                 for y in range(top, bottom):
                     for x in range(left, right):
-                        luminance = compute_luminance(px[x, y])
+                        rgb = px[x, y]
+                        luminance = compute_luminance(rgb)
                         fallback_values.append(luminance)
+                        cell_pixels.append(rgb)
                         if luminance > threshold:
                             cell_values.append(luminance)
+                            valid_rgb_pixels.append(rgb)
 
                 if cell_values:
                     cell_average = sum(cell_values) / len(cell_values)
                     delta = overall_average - cell_average
                     valid_cells += 1
                     delta_values.append(delta)
+                    has_content = True
+                    rgb_source = valid_rgb_pixels
                 else:
                     if fallback_values:
                         cell_average = sum(fallback_values) / len(fallback_values)
@@ -785,12 +914,33 @@ def analyze_bu_grid(
                         cell_average = overall_average
                     delta = overall_average - cell_average
                     delta_values.append(delta)
+                    has_content = False
+                    rgb_source = cell_pixels
+
+                if rgb_source:
+                    avg_r = sum(pixel[0] for pixel in rgb_source) / len(rgb_source)
+                    avg_g = sum(pixel[1] for pixel in rgb_source) / len(rgb_source)
+                    avg_b = sum(pixel[2] for pixel in rgb_source) / len(rgb_source)
+                    avg_rgb = (avg_r, avg_g, avg_b)
+                    red_white_score = compute_red_white_score(avg_rgb)
+                else:
+                    avg_rgb = None
+                    red_white_score = None
+                content_ratio = (len(cell_values) / len(fallback_values)) if fallback_values else 0.0
 
                 avg_row.append(cell_average)
+                rgb_row.append(avg_rgb)
                 delta_row.append(delta)
+                content_row.append(has_content)
+                ratio_row.append(content_ratio)
+                score_row.append(red_white_score)
 
             cell_averages.append(avg_row)
+            cell_rgb_averages.append(rgb_row)
             cell_deltas.append(delta_row)
+            cell_has_content.append(content_row)
+            cell_content_ratio.append(ratio_row)
+            cell_red_white_scores.append(score_row)
 
         return {
             "overall_average": overall_average,
@@ -798,6 +948,10 @@ def analyze_bu_grid(
             "grid_cols": grid_cols,
             "cell_deltas": cell_deltas,
             "cell_averages": cell_averages,
+            "cell_rgb_averages": cell_rgb_averages,
+            "cell_has_content": cell_has_content,
+            "cell_content_ratio": cell_content_ratio,
+            "cell_red_white_scores": cell_red_white_scores,
             "valid_cells": valid_cells,
             "valid_pixels": len(valid_pixels),
             "min_delta": min(delta_values) if delta_values else None,
@@ -806,26 +960,109 @@ def analyze_bu_grid(
             "analyzed_size": (width, height),
             "x_edges": x_edges,
             "y_edges": y_edges,
+            "source_box": source_box,
+            "analysis_label": analysis_label,
         }
 
 
 def find_worst_points(analysis: dict, top_n: int = 3) -> list[dict]:
+    min_row, max_row, min_col, max_col = get_product_cell_bounds(analysis)
     candidates = []
     for row_idx, row in enumerate(analysis["cell_deltas"], start=1):
         for col_idx, delta in enumerate(row, start=1):
             if delta is None:
                 continue
+            if not analysis["cell_has_content"][row_idx - 1][col_idx - 1]:
+                continue
+            if analysis["cell_content_ratio"][row_idx - 1][col_idx - 1] < PRODUCT_CELL_CONTENT_RATIO_MIN:
+                continue
+            if row_idx < min_row or row_idx > max_row:
+                continue
+            if col_idx < min_col or col_idx > max_col:
+                continue
+            score = analysis["cell_red_white_scores"][row_idx - 1][col_idx - 1]
             candidates.append(
                 {
                     "row": row_idx,
                     "col": col_idx,
                     "delta": delta,
+                    "score": score,
                     "coord": f"({col_idx},{row_idx})",
                 }
             )
 
-    candidates.sort(key=lambda item: (-item["delta"], item["row"], item["col"]))
+    candidates.sort(key=lambda item: (-(item["score"] if item["score"] is not None else float("-inf")), item["row"], item["col"]))
     return candidates[:top_n]
+
+
+def get_product_cell_bounds(analysis: dict) -> tuple[int, int, int, int]:
+    min_row = 1
+    max_row = analysis["grid_rows"]
+    min_col = 1
+    max_col = analysis["grid_cols"]
+
+    ratio_map = analysis.get("cell_content_ratio") or []
+    valid_rows = []
+    valid_cols = []
+    for row_idx, row in enumerate(ratio_map, start=1):
+        filled_ratio = (sum(1 for value in row if value >= PRODUCT_CELL_CONTENT_RATIO_MIN) / len(row)) if row else 0.0
+        if filled_ratio >= PRODUCT_ROW_COVERAGE_MIN:
+            valid_rows.append(row_idx)
+    for col_idx in range(analysis["grid_cols"]):
+        filled_ratio = (
+            sum(1 for row_idx in range(len(ratio_map)) if ratio_map[row_idx][col_idx] >= PRODUCT_CELL_CONTENT_RATIO_MIN)
+            / len(ratio_map)
+        ) if ratio_map else 0.0
+        if filled_ratio >= PRODUCT_COL_COVERAGE_MIN:
+            valid_cols.append(col_idx + 1)
+
+    if valid_rows:
+        min_row = max(min_row, min(valid_rows) - PRODUCT_BOUND_EXPAND_CELLS)
+        max_row = min(max_row, max(valid_rows) + PRODUCT_BOUND_EXPAND_CELLS)
+    if valid_cols:
+        min_col = max(min_col, min(valid_cols) - PRODUCT_BOUND_EXPAND_CELLS)
+        max_col = min(max_col, max(valid_cols) + PRODUCT_BOUND_EXPAND_CELLS)
+
+    if min_row > max_row:
+        min_row, max_row = 1, analysis["grid_rows"]
+    if min_col > max_col:
+        min_col, max_col = 1, analysis["grid_cols"]
+    return min_row, max_row, min_col, max_col
+
+
+def get_worst_point_candidate_rect(analysis: dict, width: int, height: int) -> tuple[int, int, int, int]:
+    source_box = analysis.get("source_box") or (0, 0, width, height)
+    x_edges = analysis.get("x_edges", [])
+    y_edges = analysis.get("y_edges", [])
+    min_row, max_row, min_col, max_col = get_product_cell_bounds(analysis)
+    left_idx = max(0, min_col - 1)
+    right_idx = min(len(x_edges) - 1, max_col)
+    top_idx = max(0, min_row - 1)
+    bottom_idx = min(len(y_edges) - 1, max_row)
+
+    left = source_box[0] + x_edges[left_idx]
+    top = source_box[1] + y_edges[top_idx]
+    right = source_box[0] + x_edges[right_idx] - 1
+    bottom = source_box[1] + y_edges[bottom_idx] - 1
+    return (
+        max(0, min(left, width - 1)),
+        max(0, min(top, height - 1)),
+        max(0, min(right, width - 1)),
+        max(0, min(bottom, height - 1)),
+    )
+
+
+def get_worst_point_candidate_crop_box(analysis: dict) -> tuple[int, int, int, int]:
+    source_box = analysis.get("source_box")
+    if source_box is not None:
+        width = max(1, source_box[2])
+        height = max(1, source_box[3])
+    else:
+        analyzed_width, analyzed_height = analysis.get("analyzed_size", (1, 1))
+        width = max(1, analyzed_width + (analysis.get("inner_trim", 0) * 2))
+        height = max(1, analyzed_height + (analysis.get("inner_trim", 0) * 2))
+    left, top, right, bottom = get_worst_point_candidate_rect(analysis, width, height)
+    return (left, top, right + 1, bottom + 1)
 
 
 def build_worst_point_overlay(image_path: Path, analysis: dict, overlay_path: Path) -> tuple[Path, list[dict]]:
@@ -834,22 +1071,18 @@ def build_worst_point_overlay(image_path: Path, analysis: dict, overlay_path: Pa
         overlay = img.convert("RGB")
         draw = ImageDraw.Draw(overlay)
         width, height = overlay.size
-        trim = analysis.get("inner_trim", 0)
+        source_box = analysis.get("source_box") or (0, 0, width, height)
 
-        # 실제 grid 분석에 사용된 내부 영역을 녹색 사각형으로 표시
-        draw.rectangle(
-            (trim, trim, max(trim, width - trim - 1), max(trim, height - trim - 1)),
-            outline=(0, 220, 90),
-            width=3,
-        )
+        # worst point 후보로 인정되는 제품 내부 안전영역만 녹색 사각형으로 표시
+        draw.rectangle(get_worst_point_candidate_rect(analysis, width, height), outline=(0, 220, 90), width=3)
 
         x_edges = analysis.get("x_edges", [])
         y_edges = analysis.get("y_edges", [])
         for rank, point in enumerate(worst_points, start=1):
             col_idx = point["col"] - 1
             row_idx = point["row"] - 1
-            center_x = trim + int((x_edges[col_idx] + x_edges[col_idx + 1]) / 2)
-            center_y = trim + int((y_edges[row_idx] + y_edges[row_idx + 1]) / 2)
+            center_x = source_box[0] + int((x_edges[col_idx] + x_edges[col_idx + 1]) / 2)
+            center_y = source_box[1] + int((y_edges[row_idx] + y_edges[row_idx + 1]) / 2)
             point["pixel_x"] = center_x
             point["pixel_y"] = center_y
 
@@ -864,6 +1097,121 @@ def build_worst_point_overlay(image_path: Path, analysis: dict, overlay_path: Pa
 
         overlay.save(overlay_path)
     return overlay_path, worst_points
+
+
+def get_point_center(analysis: dict, point: dict, width: int, height: int) -> tuple[int, int]:
+    source_box = analysis.get("source_box") or (0, 0, width, height)
+    x_edges = analysis.get("x_edges", [])
+    y_edges = analysis.get("y_edges", [])
+    col_idx = point["col"] - 1
+    row_idx = point["row"] - 1
+    center_x = source_box[0] + int((x_edges[col_idx] + x_edges[col_idx + 1]) / 2)
+    center_y = source_box[1] + int((y_edges[row_idx] + y_edges[row_idx + 1]) / 2)
+    return center_x, center_y
+
+
+def build_summary_worst_overlay(
+    image_path: Path,
+    analysis: dict,
+    points: list[dict],
+    overlay_path: Path,
+    label_mode: str = "count_only",
+) -> Path:
+    with Image.open(image_path) as img:
+        overlay = img.convert("RGB")
+        draw = ImageDraw.Draw(overlay)
+        width, height = overlay.size
+        draw.rectangle(get_worst_point_candidate_rect(analysis, width, height), outline=(0, 220, 90), width=3)
+
+        for point in points:
+            center_x, center_y = get_point_center(analysis, point, width, height)
+            radius = 5
+            draw.ellipse(
+                (center_x - radius, center_y - radius, center_x + radius, center_y + radius),
+                fill=(220, 20, 20),
+                outline=(255, 255, 255),
+                width=2,
+            )
+            if label_mode == "count_only":
+                label = str(point.get("count", ""))
+            else:
+                label = point.get("coord", "")
+                if point.get("count") is not None:
+                    label = f"{label} x{point['count']}"
+            draw.text((center_x + 8, center_y - 8), label, fill=(220, 20, 20))
+
+        overlay.save(overlay_path)
+    return overlay_path
+
+
+def build_summary_worst_heatmap(
+    image_path: Path,
+    analysis: dict,
+    points: list[dict],
+    overlay_path: Path,
+) -> Path:
+    with Image.open(image_path) as img:
+        width, height = img.size
+
+    worst_rect = get_worst_point_candidate_rect(analysis, width, height)
+    records = []
+    for point in points:
+        center_x, center_y = get_point_center(analysis, point, width, height)
+        records.append(
+            {
+                "X": center_x,
+                "Y": center_y,
+                "Count": point.get("count", 1),
+            }
+        )
+
+    if not records:
+        Image.new("RGB", (width, height), (0, 0, 0)).save(overlay_path)
+        return overlay_path
+
+    df = pd.DataFrame(records)
+    sns.set_theme(style="white")
+    fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=150)
+    ax.set_facecolor("#050505")
+    fig.patch.set_facecolor("#050505")
+
+    sns.kdeplot(
+        data=df,
+        x="X",
+        y="Y",
+        weights="Count",
+        cmap="magma",
+        fill=True,
+        thresh=0,
+        levels=30,
+        alpha=0.9,
+        ax=ax,
+    )
+    ax.scatter(df["X"], df["Y"], s=10, c="white", alpha=0.25)
+
+    rect = Rectangle(
+        (worst_rect[0], worst_rect[1]),
+        worst_rect[2] - worst_rect[0],
+        worst_rect[3] - worst_rect[1],
+        linewidth=2.5,
+        edgecolor="#22c55e",
+        facecolor="none",
+    )
+    ax.add_patch(rect)
+
+    ax.set_xlim(0, width)
+    ax.set_ylim(height, 0)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("BU Summary Heatmap: Worst Points Distribution", fontsize=18, fontweight="bold", pad=16, color="white")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(overlay_path, bbox_inches="tight", pad_inches=0.08, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return overlay_path
 
 
 def write_bu_analysis_excel(
@@ -882,7 +1230,7 @@ def write_bu_analysis_excel(
             "LotID",
             "ModelName",
             "판정",
-            "BU data",
+            "BU data 수치화",
             "Trim5Avg",
             "유효셀수(5px)",
             "최소편차(5px)",
@@ -907,8 +1255,10 @@ def write_bu_analysis_excel(
     detail_ws["B4"] = "편차 = 전체평균밝기 - 셀평균밝기, 밝음=- / 어두움=+"
     detail_ws["A5"] = "비검정 기준"
     detail_ws["B5"] = f"밝기 > threshold({threshold}) 인 픽셀만 사용"
-    detail_ws["A6"] = "추가 내부 축소"
-    detail_ws["B6"] = "5px 내부 축소 기준으로만 계산"
+    detail_ws["A6"] = "Grid Data"
+    detail_ws["B6"] = "기존 5px 내부 축소 영역"
+    detail_ws["A7"] = "Worst Point 기준"
+    detail_ws["B7"] = "빨강/흰색 성분 우선 + 제품 content 비율 기준"
 
     bu_records = [
         rec for rec in records
@@ -918,8 +1268,11 @@ def write_bu_analysis_excel(
     print(f"\n[7/8] BU 영역 분석 시작 (대상: {total}개)")
 
     analysis_count = 0
-    detail_start_row = 8
+    detail_start_row = 9
     worst_point_frequency: dict[str, int] = {}
+    all_worst_points: list[dict] = []
+    summary_overlay_base: Path | None = None
+    summary_overlay_analysis: dict | None = None
 
     for idx, rec in enumerate(sorted(bu_records, key=lambda item: item["lot_id"]), start=1):
         ensure_not_cancelled(cancel_check)
@@ -928,10 +1281,12 @@ def write_bu_analysis_excel(
         model_name = measurement.get("model_name", "")
 
         analyses = {
-            trim: analyze_bu_grid(Path(rec["dst"]), threshold, inner_trim=trim)
-            for trim in INNER_TRIM_VARIANTS
+            "trim5": analyze_bu_grid(Path(rec["dst"]), threshold, inner_trim=5, analysis_label="Inner Trim 5px"),
         }
-        analysis = analyses[5]
+        analysis = analyses["trim5"]
+        grid_variants = [
+            ("trim5", "Grid Data | Inner Trim 5px", "0F766E"),
+        ]
         if analysis["overall_average"] is None:
             summary_ws.append(
                 [
@@ -943,6 +1298,9 @@ def write_bu_analysis_excel(
                     0,
                     "",
                     "",
+                    "",
+                    "",
+                    "",
                     f"row {detail_start_row}",
                     "NO_VALID_PIXEL",
                 ]
@@ -952,6 +1310,17 @@ def write_bu_analysis_excel(
             overlay_path, worst_points = build_worst_point_overlay(Path(rec["dst"]), analysis, overlay_path)
             for point in worst_points:
                 worst_point_frequency[point["coord"]] = worst_point_frequency.get(point["coord"], 0) + 1
+                all_worst_points.append(
+                    {
+                        "coord": point["coord"],
+                        "row": point["row"],
+                        "col": point["col"],
+                        "lot_id": lot_id,
+                    }
+                )
+            if summary_overlay_base is None:
+                summary_overlay_base = Path(rec["dst"])
+                summary_overlay_analysis = analysis
 
             detail_ws.merge_cells(start_row=detail_start_row, start_column=1, end_row=detail_start_row, end_column=8)
             detail_ws.cell(row=detail_start_row, column=1, value=f"{lot_id} | {model_name or 'Model N/A'}")
@@ -964,7 +1333,7 @@ def write_bu_analysis_excel(
             detail_ws.cell(row=detail_start_row + 2, column=2, value=model_name)
             detail_ws.cell(row=detail_start_row + 3, column=1, value="판정")
             detail_ws.cell(row=detail_start_row + 3, column=2, value=measurement.get("judge", ""))
-            detail_ws.cell(row=detail_start_row + 4, column=1, value="BU data")
+            detail_ws.cell(row=detail_start_row + 4, column=1, value="BU data 수치화")
             detail_ws.cell(row=detail_start_row + 4, column=2, value=measurement.get("black_uniformity", ""))
             detail_ws.cell(row=detail_start_row + 1, column=4, value="전체평균밝기")
             detail_ws.cell(row=detail_start_row + 1, column=5, value=analysis["overall_average"])
@@ -974,8 +1343,8 @@ def write_bu_analysis_excel(
             detail_ws.cell(row=detail_start_row + 3, column=5, value=str(rec.get("bbox", "")))
             detail_ws.cell(row=detail_start_row + 4, column=4, value="설명")
             detail_ws.cell(row=detail_start_row + 4, column=5, value="음수=더 밝음 / 양수=더 어두움")
-            detail_ws.cell(row=detail_start_row + 5, column=4, value="비교 trim")
-            detail_ws.cell(row=detail_start_row + 5, column=5, value="5px")
+            detail_ws.cell(row=detail_start_row + 5, column=4, value="Grid Data 기준")
+            detail_ws.cell(row=detail_start_row + 5, column=5, value="5px 내부 축소 영역")
             detail_ws.cell(row=detail_start_row + 1, column=7, value="Worst1")
             detail_ws.cell(row=detail_start_row + 1, column=8, value=worst_points[0]["coord"] if len(worst_points) >= 1 else "")
             detail_ws.cell(row=detail_start_row + 2, column=7, value="Worst2")
@@ -993,9 +1362,8 @@ def write_bu_analysis_excel(
 
             section_top_row = detail_start_row + 6
             grid_start_col = 7
-            trim_colors = {5: "0F766E"}
-            for trim_index, trim in enumerate(INNER_TRIM_VARIANTS):
-                trim_analysis = analyses[trim]
+            for trim_index, (analysis_key, block_title, block_color) in enumerate(grid_variants):
+                trim_analysis = analyses[analysis_key]
                 title_row = section_top_row + trim_index * (BU_GRID_ROWS + 3)
                 grid_header_row = title_row + 1
 
@@ -1005,9 +1373,9 @@ def write_bu_analysis_excel(
                     end_row=title_row,
                     end_column=grid_start_col + 6,
                 )
-                detail_ws.cell(row=title_row, column=grid_start_col - 1, value=f"Grid Data | Inner Trim {trim}px")
+                detail_ws.cell(row=title_row, column=grid_start_col - 1, value=block_title)
                 detail_ws.cell(row=title_row, column=grid_start_col - 1).font = Font(bold=True, color="FFFFFF")
-                detail_ws.cell(row=title_row, column=grid_start_col - 1).fill = PatternFill("solid", fgColor=trim_colors[trim])
+                detail_ws.cell(row=title_row, column=grid_start_col - 1).fill = PatternFill("solid", fgColor=block_color)
                 detail_ws.cell(row=title_row, column=grid_start_col + 8, value="Avg")
                 detail_ws.cell(row=title_row, column=grid_start_col + 9, value=trim_analysis["overall_average"])
                 detail_ws.cell(row=title_row, column=grid_start_col + 10, value="Size")
@@ -1052,10 +1420,10 @@ def write_bu_analysis_excel(
                     model_name,
                     measurement.get("judge", ""),
                     measurement.get("black_uniformity", ""),
-                    analyses[5]["overall_average"],
-                    analyses[5]["valid_cells"],
-                    analyses[5]["min_delta"],
-                    analyses[5]["max_delta"],
+                    analyses["trim5"]["overall_average"],
+                    analyses["trim5"]["valid_cells"],
+                    analyses["trim5"]["min_delta"],
+                    analyses["trim5"]["max_delta"],
                     worst_points[0]["coord"] if len(worst_points) >= 1 else "",
                     worst_points[1]["coord"] if len(worst_points) >= 2 else "",
                     worst_points[2]["coord"] if len(worst_points) >= 3 else "",
@@ -1064,7 +1432,7 @@ def write_bu_analysis_excel(
                 ]
             )
             analysis_count += 1
-        detail_start_row += 6 + (len(INNER_TRIM_VARIANTS) * (BU_GRID_ROWS + 3)) + 4
+        detail_start_row += 6 + (len(grid_variants) * (BU_GRID_ROWS + 3)) + 4
 
         if idx == 1 or idx % 5 == 0 or idx == total:
             print_progress("  BU 분석 진행", idx, total, done=(idx == total))
@@ -1078,17 +1446,59 @@ def write_bu_analysis_excel(
     summary_ws["M4"] = "밝음=- / 어두움=+"
     summary_ws["L5"] = "비검정 기준"
     summary_ws["M5"] = f"밝기 > threshold({threshold})"
-    summary_ws["L6"] = "비교 trim"
-    summary_ws["M6"] = "5px"
-    summary_ws["L8"] = "Worst Point Frequency"
-    summary_ws["L9"] = "Coord"
-    summary_ws["M9"] = "Count"
+    summary_ws["L6"] = "Grid Data 기준"
+    summary_ws["M6"] = "5px 내부 축소 영역"
+    summary_ws["L7"] = "Worst Point 기준"
+    summary_ws["M7"] = "빨강/흰색 성분 우선 + 제품 content 비율 기준"
+    summary_ws["AB2"] = "Worst Point Frequency"
+    summary_ws["AB3"] = "Coord"
+    summary_ws["AC3"] = "Count"
     for idx, (coord, count) in enumerate(
         sorted(worst_point_frequency.items(), key=lambda item: (-item[1], item[0])),
-        start=10,
+        start=4,
     ):
-        summary_ws.cell(row=idx, column=12, value=coord)
-        summary_ws.cell(row=idx, column=13, value=count)
+        summary_ws.cell(row=idx, column=28, value=coord)
+        summary_ws.cell(row=idx, column=29, value=count)
+
+    if summary_overlay_base is not None and summary_overlay_analysis is not None and all_worst_points:
+        summary_overlay_path = analysis_excel_path.with_name("bu_worst_points_summary_counts.png")
+        summary_heatmap_path = analysis_excel_path.with_name("bu_worst_points_summary_heatmap.png")
+        aggregate_points = []
+        for coord, count in sorted(worst_point_frequency.items(), key=lambda item: (-item[1], item[0])):
+            coord_text = coord.strip("()")
+            col_str, row_str = coord_text.split(",")
+            aggregate_points.append(
+                {
+                    "coord": coord,
+                    "col": int(col_str),
+                    "row": int(row_str),
+                    "count": count,
+                }
+            )
+        build_summary_worst_overlay(
+            summary_overlay_base,
+            summary_overlay_analysis,
+            aggregate_points,
+            summary_overlay_path,
+            label_mode="count_only",
+        )
+        build_summary_worst_heatmap(summary_overlay_base, summary_overlay_analysis, aggregate_points, summary_heatmap_path)
+        summary_ws["L1"] = "Worst Point Count Overlay"
+        summary_ws["L1"].font = Font(size=13, bold=True, color="111827")
+        overlay_img = XLImage(str(summary_overlay_path))
+        if overlay_img.width > 420:
+            ratio = 420 / overlay_img.width
+            overlay_img.width = int(overlay_img.width * ratio)
+            overlay_img.height = int(overlay_img.height * ratio)
+        summary_ws.add_image(overlay_img, "L2")
+        summary_ws["T1"] = "Worst Point Heatmap"
+        summary_ws["T1"].font = Font(size=13, bold=True, color="111827")
+        heatmap_img = XLImage(str(summary_heatmap_path))
+        if heatmap_img.width > 420:
+            ratio = 420 / heatmap_img.width
+            heatmap_img.width = int(heatmap_img.width * ratio)
+            heatmap_img.height = int(heatmap_img.height * ratio)
+        summary_ws.add_image(heatmap_img, "T2")
     for col, width in {
         "A": 24,
         "B": 24,
@@ -1103,6 +1513,10 @@ def write_bu_analysis_excel(
         "K": 24,
         "L": 16,
         "M": 16,
+        "T": 16,
+        "U": 16,
+        "AB": 16,
+        "AC": 10,
     }.items():
         summary_ws.column_dimensions[col].width = width
 
@@ -1208,7 +1622,7 @@ def write_excel(
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
-    ws.append(["LotID", "판정", "BU data", "BU Image", "WU data", "WU Image"])
+    ws.append(["LotID", "판정", "BU data 수치화", "BU Image", "WU data", "WU Image"])
 
     total = len(records)
     print(f"\n[6/7] 엑셀 작성 시작 (행: {total}개)")
