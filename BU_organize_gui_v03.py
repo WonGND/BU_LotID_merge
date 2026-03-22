@@ -383,29 +383,30 @@ class BUOrganizeApp:
     def _build_settings_view(self) -> None:
         self.settings_view.columnconfigure(0, weight=1)
 
+        # 공통 라벨 너비 설정
+        LBL_W = 22
+
         general = self._make_card(self.settings_view, "일반", 0)
-        general.columnconfigure(0, minsize=180)
         general.columnconfigure(1, weight=1)
-        ttk.Label(general, text="테마", style="CardCaption.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(general, text="테마", style="CardCaption.TLabel", width=LBL_W).grid(row=0, column=0, sticky="w")
         theme_combo = ttk.Combobox(general, state="readonly", values=["light", "dark"], textvariable=self.theme_name_var, width=18)
-        theme_combo.grid(row=0, column=1, sticky="ew", padx=(12, 0))
+        theme_combo.grid(row=0, column=1, sticky="w", padx=(12, 0))
         theme_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_settings_changed(apply_theme=True))
 
-        ttk.Label(general, text="완료 후 자동 열기", style="CardCaption.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(general, text="완료 후 자동 열기", style="CardCaption.TLabel", width=LBL_W).grid(row=1, column=0, sticky="w", pady=(10, 0))
         auto_combo = ttk.Combobox(general, state="readonly", values=["none", "excel", "folder", "both"], textvariable=self.auto_open_var, width=18)
-        auto_combo.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(10, 0))
+        auto_combo.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
         auto_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_settings_changed())
 
         remember = ttk.Checkbutton(general, text="최근 사용 경로 기억", variable=self.remember_paths_var, command=self._on_settings_changed)
         remember.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         analysis = self._make_card(self.settings_view, "분석 기본값", 1)
-        analysis.columnconfigure(0, minsize=180)
         analysis.columnconfigure(1, weight=1)
-        ttk.Label(analysis, text="임계값 기본값", style="CardCaption.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Entry(analysis, textvariable=self.default_threshold_var, width=14).grid(row=0, column=1, sticky="ew", padx=(12, 0))
-        ttk.Label(analysis, text="크롭 패딩 기본값", style="CardCaption.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Entry(analysis, textvariable=self.default_padding_var, width=14).grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(10, 0))
+        ttk.Label(analysis, text="임계값 기본값", style="CardCaption.TLabel", width=LBL_W).grid(row=0, column=0, sticky="w")
+        ttk.Entry(analysis, textvariable=self.default_threshold_var, width=21).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(analysis, text="크롭 패딩 기본값", style="CardCaption.TLabel", width=LBL_W).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(analysis, textvariable=self.default_padding_var, width=21).grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
         ttk.Button(analysis, text="현재 입력값 반영", command=self._apply_defaults_to_inputs).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
         paths = self._make_card(self.settings_view, "바로가기", 2)
