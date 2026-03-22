@@ -132,9 +132,23 @@ def ask_path(prompt: str) -> Path:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
-    # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
+    # 최신 폴더 비교 기준: 폴더 내 이미지 파일들 중 가장 최신 수정시각
+    # 이미지 파일이 없으면 폴더 자체의 수정시각을 보조적으로 사용
+    try:
+        file_mtimes = [
+            f.stat().st_mtime
+            for f in path.iterdir()
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
+        ]
+        if file_mtimes:
+            latest_file_mtime = max(file_mtimes)
+            # 파일 수정 시간을 1순위로 비교
+            return (latest_file_mtime, latest_file_mtime)
+    except Exception:
+        pass
+
     stat = path.stat()
-    return (stat.st_ctime, stat.st_mtime)
+    return (stat.st_mtime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
@@ -598,18 +612,19 @@ def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tu
         current = latest_by_lotid.get(lot_id)
         is_latest = False
 
+        # 파일 기준 시간 키 획득
+        f_time_key = folder_time_key(p)[0]
+
         if current is None or folder_time_key(p) > folder_time_key(current):
             latest_by_lotid[lot_id] = p
             is_latest = True
 
-        created_ts = p.stat().st_ctime
-        modified_ts = p.stat().st_mtime
         rows.append(
             {
                 "lot_id": lot_id,
                 "folder_path": str(p),
-                "created_time": format_ts(created_ts),
-                "modified_time": format_ts(modified_ts),
+                "created_time": format_ts(p.stat().st_ctime),
+                "modified_time": format_ts(f_time_key), # 파일 기준 수정 시간 기록
                 "selected_latest_at_scan_time": "TRUE" if is_latest else "FALSE",
             }
         )
