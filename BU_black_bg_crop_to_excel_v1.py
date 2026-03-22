@@ -1,7 +1,9 @@
+import io
 import re
 import shutil
 from pathlib import Path
 
+import numpy as np
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
@@ -10,6 +12,27 @@ from PIL import Image
 ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 # 파일명에서 LotID/종류(BU, WU)를 뽑기 위한 패턴
 LOT_PATTERN = re.compile(r"^(?P<lotid>.+)_(?P<kind>BU|WU)_\d+$", re.IGNORECASE)
+
+
+def get_resized_xl_image(image_path: Path, max_width_px: int) -> XLImage | None:
+    # 엑셀 파일 용량 다이어트를 위해 삽입 전에 이미지를 리사이징하여 BytesIO로 반환
+    if not image_path.exists():
+        return None
+    try:
+        with Image.open(image_path) as img:
+            w, h = img.size
+            if w > max_width_px:
+                ratio = max_width_px / w
+                new_w, new_h = int(w * ratio), int(h * ratio)
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format="PNG")
+            img_byte_arr.seek(0)
+            return XLImage(img_byte_arr)
+    except Exception as e:
+        print(f"Error resizing image {image_path}: {e}")
+        return None
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
@@ -46,30 +69,18 @@ def ask_int(prompt: str, default: int) -> int:
 
 
 def find_non_black_bbox(img: Image.Image, threshold: int = 12):
-    # 검은 배경(저밝기)을 제외한 영역의 최소 사각형(BBox) 검출
-    # threshold를 올리면 더 어두운 영역까지 배경으로 간주한다.
-    gray = img.convert("L")
-    w, h = gray.size
-    px = gray.load()
+    # 검은 배경(저밝기)을 제외한 영역의 최소 사각형(BBox) 검출 (NumPy 최적화 버전)
+    arr = np.array(img.convert("L"))
+    rows = np.any(arr > threshold, axis=1)
+    cols = np.any(arr > threshold, axis=0)
 
-    min_x, min_y = w, h
-    max_x, max_y = -1, -1
-
-    for y in range(h):
-        for x in range(w):
-            if px[x, y] > threshold:
-                if x < min_x:
-                    min_x = x
-                if y < min_y:
-                    min_y = y
-                if x > max_x:
-                    max_x = x
-                if y > max_y:
-                    max_y = y
-
-    if max_x < min_x or max_y < min_y:
+    if not np.any(rows) or not np.any(cols):
         return None
-    return min_x, min_y, max_x + 1, max_y + 1
+
+    min_y, max_y = np.where(rows)[0][[0, -1]]
+    min_x, max_x = np.where(cols)[0][[0, -1]]
+
+    return int(min_x), int(min_y), int(max_x + 1), int(max_y + 1)
 
 
 def add_padding(box, w: int, h: int, pad: int):
@@ -192,22 +203,16 @@ def write_excel(records, excel_path: Path, image_width_px: int = 240):
         max_img_height = 0
 
         if bu_path is not None and Path(bu_path).exists():
-            bu_img = XLImage(str(bu_path))
-            if bu_img.width > image_width_px:
-                ratio = image_width_px / bu_img.width
-                bu_img.width = int(bu_img.width * ratio)
-                bu_img.height = int(bu_img.height * ratio)
-            ws.add_image(bu_img, f"D{row}")
-            max_img_height = max(max_img_height, bu_img.height)
+            bu_img = get_resized_xl_image(Path(bu_path), image_width_px)
+            if bu_img:
+                ws.add_image(bu_img, f"D{row}")
+                max_img_height = max(max_img_height, bu_img.height)
 
         if wu_path is not None and Path(wu_path).exists():
-            wu_img = XLImage(str(wu_path))
-            if wu_img.width > image_width_px:
-                ratio = image_width_px / wu_img.width
-                wu_img.width = int(wu_img.width * ratio)
-                wu_img.height = int(wu_img.height * ratio)
-            ws.add_image(wu_img, f"F{row}")
-            max_img_height = max(max_img_height, wu_img.height)
+            wu_img = get_resized_xl_image(Path(wu_path), image_width_px)
+            if wu_img:
+                ws.add_image(wu_img, f"F{row}")
+                max_img_height = max(max_img_height, wu_img.height)
 
         ws.row_dimensions[row].height = max(25, int(max_img_height * 0.75))
         row += 1
