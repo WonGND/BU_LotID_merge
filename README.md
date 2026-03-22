@@ -11,5 +11,5 @@ python BU_organize_gui.py
 ## EXE Build
 
 ```bash
-pyinstaller --clean --noconsole --onefile --icon tovis_bu_data.ico --name "TOVIS_BU_DATA_정리_v0.1" --hidden-import tkinter --hidden-import _tkinter --add-data "C:\Users\TOVIS\AppData\Local\Python\pythoncore-3.14-64\tcl\tcl8.6;_tcl_data" --add-data "C:\Users\TOVIS\AppData\Local\Python\pythoncore-3.14-64\tcl\tk8.6;_tk_data" BU_organize_gui.py
+pyinstaller --clean --noconsole --onefile --icon tovis_bu_data.ico --name "TOVIS_BU_DATA_정리_v0.1" --hidden-import tkinter --hidden-import _tkinter BU_organize_gui.py
 ```
