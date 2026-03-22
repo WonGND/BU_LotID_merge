@@ -132,34 +132,39 @@ def ask_path(prompt: str) -> Path:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
-    # 최신 폴더 비교 기준: 폴더 내 이미지 파일들 중 가장 최신 수정시각
-    # 이미지 파일이 없으면 폴더 자체의 수정시각을 보조적으로 사용
+    # 최신 폴더 비교 기준: 폴더 내(하위 포함) 모든 이미지 파일들 중 가장 최신 수정시각
+    # 폴더 자체의 수정시간은 신뢰할 수 없으므로 무시하고, 오직 이미지 파일의 시간만 사용
     try:
+        # rglob을 사용하여 하위 폴더의 모든 이미지를 탐색
         file_mtimes = [
             f.stat().st_mtime
-            for f in path.iterdir()
+            for f in path.rglob("*")
             if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
         ]
         if file_mtimes:
             latest_file_mtime = max(file_mtimes)
-            # 파일 수정 시간을 1순위로 비교
+            # 이미지 파일의 시간을 1순위로 비교
             return (latest_file_mtime, latest_file_mtime)
     except Exception:
         pass
 
+    # 이미지가 하나도 없는 경우에만 폴더 시간을 보조적으로 사용
     stat = path.stat()
     return (stat.st_mtime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
-    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리
+    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리 (하위 포함)
     if not path.is_dir():
         return False
-    image_count = 0
-    for child in path.iterdir():
-        if child.is_file() and child.suffix.lower() in ALLOWED_EXTENSIONS:
-            image_count += 1
-    return image_count >= 1
+    try:
+        # 하위 폴더까지 뒤져서 이미지 파일이 하나라도 있는지 확인
+        for f in path.rglob("*"):
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def format_ts(ts: float) -> str:
