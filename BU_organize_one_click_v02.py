@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import io
 import re
 import shutil
@@ -132,35 +132,20 @@ def ask_path(prompt: str) -> Path:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
-    # 최신 폴더 비교 기준: 해당 폴더 '직계' 이미지 파일들 중 가장 최신 수정시각
-    # 상위 폴더가 잘못 LotID 후보로 잡히지 않도록 하위 폴더는 보지 않는다.
-    try:
-        file_mtimes = [
-            f.stat().st_mtime
-            for f in path.iterdir()
-            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
-        ]
-        if file_mtimes:
-            latest_file_mtime = max(file_mtimes)
-            return (latest_file_mtime, latest_file_mtime)
-    except Exception:
-        pass
-
+    # 최신 폴더 비교 기준: 생성시각 우선, 동일하면 수정시각
     stat = path.stat()
-    return (stat.st_mtime, stat.st_mtime)
+    return (stat.st_ctime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
-    # LotID 폴더 판정 규칙: 해당 폴더 '직계'에 이미지 파일이 1개 이상 있는 디렉터리
+    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리
     if not path.is_dir():
         return False
-    try:
-        for f in path.iterdir():
-            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-                return True
-    except Exception:
-        pass
-    return False
+    image_count = 0
+    for child in path.iterdir():
+        if child.is_file() and child.suffix.lower() in ALLOWED_EXTENSIONS:
+            image_count += 1
+    return image_count >= 1
 
 
 def format_ts(ts: float) -> str:
@@ -323,21 +308,11 @@ def build_metric_summary(latest_measurements: dict[str, dict], key: str, spec_mi
     }
 
 
-def distribution_match(label: str, value: float, lower: float, upper: float) -> bool:
-    if label.startswith("<"):
-        return value < upper
-    if label.startswith(">"):
-        return value > lower
-    return lower <= value < upper
-
-
-def build_distribution(values: list[float], bins: list[tuple[str, float, float]]) -> list[tuple[str, int, float]]:
-    counts: list[tuple[str, int, float]] = []
-    total = len(values)
+def build_distribution(values: list[float], bins: list[tuple[str, float, float]]) -> list[tuple[str, int]]:
+    counts: list[tuple[str, int]] = []
     for label, lower, upper in bins:
-        count = sum(1 for value in values if distribution_match(label, value, lower, upper))
-        ratio = 0.0 if total == 0 else (count / total) * 100
-        counts.append((label, count, ratio))
+        count = sum(1 for value in values if lower <= value < upper)
+        counts.append((label, count))
     return counts
 
 
@@ -365,29 +340,27 @@ def write_kpi_table(ws, start_row: int, start_col: int, title: str, rows: list[t
 
 
 def style_line_chart(chart: LineChart, value_color: str, spec_color: str) -> None:
-    chart.style = 2
-    chart.legend = None
-    chart.height = 6.6
-    chart.width = 8.8
+    chart.style = 10
+    chart.legend.position = "b"
+    chart.height = 7.8
+    chart.width = 13.5
     chart.smooth = True
-    chart.plotVisOnly = False
     if len(chart.ser) >= 1:
         chart.ser[0].graphicalProperties.line.solidFill = value_color
         chart.ser[0].graphicalProperties.line.width = 22000
         chart.ser[0].marker.symbol = "circle"
-        chart.ser[0].marker.size = 5
+        chart.ser[0].marker.size = 6
     if len(chart.ser) >= 2:
         chart.ser[1].graphicalProperties.line.solidFill = spec_color
         chart.ser[1].graphicalProperties.line.prstDash = "dash"
-        chart.ser[1].graphicalProperties.line.width = 12000
+        chart.ser[1].graphicalProperties.line.width = 14000
 
 
 def style_bar_chart(chart: BarChart, fill_color: str) -> None:
     chart.style = 11
     chart.legend = None
-    chart.height = 6.8
-    chart.width = 9.2
-    chart.plotVisOnly = False
+    chart.height = 7.6
+    chart.width = 11.8
     if len(chart.ser) >= 1:
         chart.ser[0].graphicalProperties.solidFill = fill_color
         chart.ser[0].graphicalProperties.line.solidFill = fill_color
@@ -395,10 +368,9 @@ def style_bar_chart(chart: BarChart, fill_color: str) -> None:
 
 def style_pie_chart(chart: PieChart) -> None:
     chart.style = 26
-    chart.legend.position = "r"
-    chart.height = 5.8
-    chart.width = 7.6
-    chart.plotVisOnly = False
+    chart.legend.position = "b"
+    chart.height = 6.4
+    chart.width = 8.4
 
 
 def pick_worst_lotids(latest_measurements: dict[str, dict], key: str, limit: int = 10) -> list[tuple[str, str, float]]:
@@ -415,272 +387,194 @@ def pick_worst_lotids(latest_measurements: dict[str, dict], key: str, limit: int
 def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) -> None:
     ws = wb.create_sheet("시각화")
     ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A4"
-
-    dark = PatternFill("solid", fgColor="F8FAFC")
-    soft = PatternFill("solid", fgColor="E2E8F0")
-    header_fill = PatternFill("solid", fgColor="FFFFFF")
-    panel_fill = PatternFill("solid", fgColor="EEF4FB")
-    white_fill = PatternFill("solid", fgColor="FFFFFF")
-    border_fill = PatternFill("solid", fgColor="CBD5E1")
-
-    for col in range(1, 19):
-        ws.cell(row=1, column=col).fill = header_fill
-
-    ws.merge_cells("A1:F2")
-    ws["A1"] = "Manufacturing Intelligence"
-    ws["A1"].font = Font(size=17, bold=True, color="1F2937")
+    ws.merge_cells("A1:H2")
+    ws["A1"] = "BU / WU Measurement Dashboard"
+    ws["A1"].font = Font(size=20, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="111827")
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.merge_cells("G1:J2")
-    ws["G1"] = "Unit 04 / Quality Control"
-    ws["G1"].font = Font(size=10, bold=True, color="64748B")
-    ws["G1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.merge_cells("K1:N2")
-    ws["K1"] = "Search LotID..."
-    ws["K1"].fill = PatternFill("solid", fgColor="F1F5F9")
-    ws["K1"].font = Font(size=11, color="94A3B8")
-    ws["K1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws["Q1"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    ws["Q1"].font = Font(size=9, color="64748B")
+    ws["I1"] = datetime.now().strftime("Updated: %Y-%m-%d %H:%M:%S")
+    ws["I1"].font = Font(size=10, color="6B7280")
 
     bu_summary = build_metric_summary(latest_measurements, "black_uniformity", BU_SPEC_MIN)
     wu_summary = build_metric_summary(latest_measurements, "white_uniformity", WU_SPEC_MIN)
     total_count = max(bu_summary["count"], wu_summary["count"])
-    pass_rate = 0 if total_count == 0 else ((bu_summary["pass_count"] + wu_summary["pass_count"]) / max(1, bu_summary["count"] + wu_summary["count"]) * 100)
 
-    write_card(ws, "E4", "BU FAIL", f"{bu_summary['fail_count']} UNITS", f"SPEC {BU_SPEC_MIN}", "475569")
-    write_card(ws, "H4", "WU FAIL", f"{wu_summary['fail_count']} UNITS", f"SPEC {WU_SPEC_MIN}", "64748B")
-    write_card(ws, "K4", "PASS RATE", f"{pass_rate:.1f}%", "OVERALL QUALITY", "1D4ED8")
-    write_card(ws, "N4", "TOTAL LOTID", f"{total_count}", "BATCHES", "0F766E")
+    write_card(ws, "A4", "전체 LotID", total_count, "최신 측정 기준", "0F766E")
+    write_card(ws, "D4", "BU Fail", bu_summary["fail_count"], f"Spec {BU_SPEC_MIN}", "B91C1C")
+    write_card(ws, "G4", "WU Fail", wu_summary["fail_count"], f"Spec {WU_SPEC_MIN}", "7C2D12")
+    write_card(ws, "J4", "Pass Rate", f"{(0 if total_count == 0 else ((bu_summary['pass_count'] + wu_summary['pass_count']) / max(1, bu_summary['count'] + wu_summary['count']) * 100)):.1f}%", "BU+WU combined", "1D4ED8")
 
-    # Left navigation mimic
-    ws.merge_cells("A4:C6")
-    ws["A4"] = "Unit 04\nQUALITY CONTROL"
-    ws["A4"].fill = white_fill
-    ws["A4"].font = Font(size=11, bold=True, color="334155")
-    ws["A4"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    nav_items = [("Overview", 8), ("Detailed Metrics", 10), ("Trend Analysis", 12), ("Historical Records", 14)]
-    for label, row in nav_items:
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=1).font = Font(size=11, bold=True, color="334155")
-        ws.cell(row=row, column=1).fill = white_fill if label != "Overview" else PatternFill("solid", fgColor="F8FAFC")
+    ws["A8"] = "Metric Summary"
+    ws["A8"].font = Font(size=13, bold=True, color="111827")
+    ws["A9"] = "지표"
+    ws["B9"] = "Spec Min"
+    ws["C9"] = "Count"
+    ws["D9"] = "Pass"
+    ws["E9"] = "Fail"
+    ws["F9"] = "Min"
+    ws["G9"] = "Avg"
+    ws["H9"] = "Median"
+    ws["I9"] = "Max"
 
-    # Metric summary panel
-    ws.merge_cells("E8:L9")
-    ws["E8"] = "Metric Summary"
-    ws["E8"].fill = panel_fill
-    ws["E8"].font = Font(size=14, bold=True, color="334155")
-    ws["M8"] = "CONFIDENCE LEVEL 99.7%"
-    ws["M8"].font = Font(size=8, bold=True, color="64748B")
-    ws["M8"].alignment = Alignment(horizontal="right")
-    metric_headers = ["METRIC", "SPEC\nMIN", "COUNT", "PASS", "FAIL", "MIN", "AVG", "MEDIAN"]
-    for col, value in enumerate(metric_headers, start=5):
-        cell = ws.cell(row=10, column=col, value=value)
-        cell.fill = soft
-        cell.font = Font(size=9, bold=True, color="64748B")
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws["9:9"]:
+        cell.fill = header_fill
+        cell.font = header_font
+
     metric_rows = [
-        ("Black\nUniformity", BU_SPEC_MIN, bu_summary),
-        ("White\nUniformity", WU_SPEC_MIN, wu_summary),
+        ("Black Uniformity", BU_SPEC_MIN, bu_summary),
+        ("White Uniformity", WU_SPEC_MIN, wu_summary),
     ]
-    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=11):
-        values = [label, spec_min, summary["count"], summary["pass_count"], summary["fail_count"], summary["min"], summary["avg"], summary["median"]]
-        for offset, value in enumerate(values, start=5):
-            cell = ws.cell(row=row_idx, column=offset, value=value)
-            cell.fill = white_fill
-            cell.font = Font(size=12 if offset == 5 else 11, bold=(offset == 5), color="334155")
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=10):
+        ws.cell(row=row_idx, column=1, value=label)
+        ws.cell(row=row_idx, column=2, value=spec_min)
+        ws.cell(row=row_idx, column=3, value=summary["count"])
+        ws.cell(row=row_idx, column=4, value=summary["pass_count"])
+        ws.cell(row=row_idx, column=5, value=summary["fail_count"])
+        ws.cell(row=row_idx, column=6, value=summary["min"])
+        ws.cell(row=row_idx, column=7, value=summary["avg"])
+        ws.cell(row=row_idx, column=8, value=summary["median"])
+        ws.cell(row=row_idx, column=9, value=summary["max"])
 
-    # Worst cards
-    def draw_worst_table(start_row: int, title: str, rows: list[tuple[str, object]]) -> None:
-        ws.merge_cells(start_row=start_row, start_column=13, end_row=start_row, end_column=18)
-        head = ws.cell(row=start_row, column=13, value=title)
-        head.fill = panel_fill
-        head.font = Font(size=12, bold=True, color="334155")
-        headers = ("LOTID", "VALUE")
-        for idx, text in enumerate(headers, start=13):
-            c = ws.cell(row=start_row + 1, column=idx, value=text)
-            c.fill = soft
-            c.font = Font(size=8, bold=True, color="64748B")
-        for r_idx, (lot_id, value) in enumerate(rows[:3], start=start_row + 2):
-            ws.cell(row=r_idx, column=13, value=lot_id).fill = white_fill
-            ws.cell(row=r_idx, column=13).font = Font(size=10, bold=True, color="475569")
-            ws.cell(row=r_idx, column=18, value=value).fill = white_fill
-            ws.cell(row=r_idx, column=18).font = Font(size=10, bold=True, color="DC2626")
-    draw_worst_table(8, "WORST BU LOTID", [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "black_uniformity", 3)])
-    draw_worst_table(14, "WORST WU LOTID", [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "white_uniformity", 3)])
+    # 정렬 추세 차트용 데이터
+    ws["K9"] = "BU_index"
+    ws["L9"] = "BU_value"
+    ws["M9"] = "BU_spec"
+    for idx, value in enumerate(bu_summary["sorted_values"], start=10):
+        ws.cell(row=idx, column=11, value=idx - 2)
+        ws.cell(row=idx, column=12, value=value)
+        ws.cell(row=idx, column=13, value=BU_SPEC_MIN)
 
-    # Range distributions as simple card tables
+    ws["O9"] = "WU_index"
+    ws["P9"] = "WU_value"
+    ws["Q9"] = "WU_spec"
+    for idx, value in enumerate(wu_summary["sorted_values"], start=10):
+        ws.cell(row=idx, column=15, value=idx - 2)
+        ws.cell(row=idx, column=16, value=value)
+        ws.cell(row=idx, column=17, value=WU_SPEC_MIN)
+
+    bu_line = LineChart()
+    bu_line.title = "BU 분포 추세"
+    bu_line.y_axis.title = "Black Uniformity"
+    bu_line.x_axis.title = "정렬 순서"
+    bu_data = Reference(ws, min_col=12, max_col=13, min_row=9, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
+    bu_cats = Reference(ws, min_col=11, min_row=10, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
+    bu_line.add_data(bu_data, titles_from_data=True)
+    bu_line.set_categories(bu_cats)
+    style_line_chart(bu_line, "DC2626", "94A3B8")
+    ws.add_chart(bu_line, "A14")
+
+    wu_line = LineChart()
+    wu_line.title = "WU 분포 추세"
+    wu_line.y_axis.title = "White Uniformity"
+    wu_line.x_axis.title = "정렬 순서"
+    wu_data = Reference(ws, min_col=16, max_col=17, min_row=9, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
+    wu_cats = Reference(ws, min_col=15, min_row=10, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
+    wu_line.add_data(wu_data, titles_from_data=True)
+    wu_line.set_categories(wu_cats)
+    style_line_chart(wu_line, "16A34A", "94A3B8")
+    ws.add_chart(wu_line, "N14")
+
+    # Pass/Fail 파이 차트
+    ws["A31"] = "Metric"
+    ws["B31"] = "Pass"
+    ws["C31"] = "Fail"
+    ws["A32"] = "BU"
+    ws["B32"] = bu_summary["pass_count"]
+    ws["C32"] = bu_summary["fail_count"]
+    ws["A33"] = "WU"
+    ws["B33"] = wu_summary["pass_count"]
+    ws["C33"] = wu_summary["fail_count"]
+
+    bu_pie = PieChart()
+    bu_pie.title = "BU Pass/Fail"
+    bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=32, max_row=32), from_rows=True)
+    bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
+    bu_pie.dataLabels = DataLabelList()
+    bu_pie.dataLabels.showPercent = True
+    bu_pie.dataLabels.showVal = True
+    style_pie_chart(bu_pie)
+    ws.add_chart(bu_pie, "A35")
+
+    wu_pie = PieChart()
+    wu_pie.title = "WU Pass/Fail"
+    wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=33, max_row=33), from_rows=True)
+    wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
+    wu_pie.dataLabels = DataLabelList()
+    wu_pie.dataLabels.showPercent = True
+    wu_pie.dataLabels.showVal = True
+    style_pie_chart(wu_pie)
+    ws.add_chart(wu_pie, "J35")
+
+    # Spec 기준 중심 버킷 분포
     bu_bins = [
-        ("<50%", 0, 50),
-        ("50-52%", 50, 52),
-        ("52-54%", 52, 54),
-        ("54-56%", 54, 56),
-        ("56-58%", 56, 58),
-        ("58-60%", 58, 60),
-        (">60%", 60, 9999),
+        ("<40", 0, 40),
+        ("40-45", 40, 45),
+        ("45-50", 45, 50),
+        ("50-55", 50, 55),
+        ("55-60", 55, 60),
+        ("60+", 60, 9999),
     ]
     wu_bins = [
-        ("<80%", 0, 80),
-        ("80-82%", 80, 82),
-        ("82-84%", 82, 84),
-        ("84-86%", 84, 86),
-        ("86-88%", 86, 88),
-        (">88%", 88, 9999),
+        ("<70", 0, 70),
+        ("70-75", 70, 75),
+        ("75-80", 75, 80),
+        ("80-85", 80, 85),
+        ("85-90", 85, 90),
+        ("90+", 90, 9999),
     ]
     bu_distribution = build_distribution(bu_summary["sorted_values"], bu_bins)
     wu_distribution = build_distribution(wu_summary["sorted_values"], wu_bins)
 
-    def draw_distribution_card(start_row: int, start_col: int, title: str, rows: list[tuple[str, int, float]]) -> None:
-        ws.merge_cells(start_row=start_row, start_column=start_col, end_row=start_row, end_column=start_col + 3)
-        ws.cell(row=start_row, column=start_col, value=title).fill = white_fill
-        ws.cell(row=start_row, column=start_col).font = Font(size=10, bold=True, color="475569")
-        header_row = start_row + 1
-        header_specs = (
-            (start_col, "RANGE", "475569"),
-            (start_col + 1, "DISTRIBUTION", "475569"),
-            (start_col + 3, "COUNT", "475569"),
-        )
-        for col, text, color in header_specs:
-            cell = ws.cell(row=header_row, column=col, value=text)
-            cell.font = Font(size=8, bold=True, color=color)
-            cell.alignment = Alignment(horizontal="left", vertical="center")
-        for idx, (label, count, ratio) in enumerate(rows, start=start_row + 2):
-            ws.cell(row=idx, column=start_col, value=label).font = Font(size=9, bold=True, color="475569")
-            ws.merge_cells(start_row=idx, start_column=start_col + 1, end_row=idx, end_column=start_col + 2)
-            if count <= 0:
-                distribution_text = ""
-            else:
-                bar_units = max(1, round(ratio / 5))
-                distribution_text = f"{'▇' * bar_units} {ratio:.1f}%"
-            bar_cell = ws.cell(row=idx, column=start_col + 1, value=distribution_text)
-            bar_cell.font = Font(size=9, color="64748B", bold=True)
-            bar_cell.alignment = Alignment(horizontal="left", vertical="center")
-            count_cell = ws.cell(row=idx, column=start_col + 3, value=count)
-            count_cell.font = Font(size=9, bold=True, color="64748B")
-            count_cell.alignment = Alignment(horizontal="right", vertical="center")
-    distribution_row = 41
-    draw_distribution_card(distribution_row, 5, "BU RANGE DISTRIBUTION", bu_distribution)
-    draw_distribution_card(distribution_row, 10, "WU RANGE DISTRIBUTION", wu_distribution)
+    ws["S9"] = "BU_bucket"
+    ws["T9"] = "BU_count"
+    for idx, (label, count) in enumerate(bu_distribution, start=10):
+        ws.cell(row=idx, column=19, value=label)
+        ws.cell(row=idx, column=20, value=count)
 
-    # Hidden chart source data at BI+
-    base_col = 61  # BI
-    ws.cell(row=2, column=base_col, value="BU_index")
-    ws.cell(row=2, column=base_col + 1, value="BU_value")
-    ws.cell(row=2, column=base_col + 2, value="BU_spec")
-    for idx, value in enumerate(bu_summary["sorted_values"], start=3):
-        ws.cell(row=idx, column=base_col, value=idx - 2)
-        ws.cell(row=idx, column=base_col + 1, value=value)
-        ws.cell(row=idx, column=base_col + 2, value=BU_SPEC_MIN)
-
-    ws.cell(row=2, column=base_col + 4, value="WU_index")
-    ws.cell(row=2, column=base_col + 5, value="WU_value")
-    ws.cell(row=2, column=base_col + 6, value="WU_spec")
-    for idx, value in enumerate(wu_summary["sorted_values"], start=3):
-        ws.cell(row=idx, column=base_col + 4, value=idx - 2)
-        ws.cell(row=idx, column=base_col + 5, value=value)
-        ws.cell(row=idx, column=base_col + 6, value=WU_SPEC_MIN)
-
-    ws.cell(row=2, column=base_col + 8, value="BU_bucket")
-    ws.cell(row=2, column=base_col + 9, value="BU_count")
-    for idx, (label, count, ratio) in enumerate(bu_distribution, start=3):
-        ws.cell(row=idx, column=base_col + 8, value=label)
-        ws.cell(row=idx, column=base_col + 9, value=count)
-    ws.cell(row=2, column=base_col + 11, value="WU_bucket")
-    ws.cell(row=2, column=base_col + 12, value="WU_count")
-    for idx, (label, count, ratio) in enumerate(wu_distribution, start=3):
-        ws.cell(row=idx, column=base_col + 11, value=label)
-        ws.cell(row=idx, column=base_col + 12, value=count)
-
-    ws.cell(row=2, column=base_col + 14, value="Metric")
-    ws.cell(row=2, column=base_col + 15, value="Pass")
-    ws.cell(row=2, column=base_col + 16, value="Fail")
-    ws.cell(row=3, column=base_col + 14, value="BU")
-    ws.cell(row=3, column=base_col + 15, value=bu_summary["pass_count"])
-    ws.cell(row=3, column=base_col + 16, value=bu_summary["fail_count"])
-    ws.cell(row=4, column=base_col + 14, value="WU")
-    ws.cell(row=4, column=base_col + 15, value=wu_summary["pass_count"])
-    ws.cell(row=4, column=base_col + 16, value=wu_summary["fail_count"])
-
-    bu_line = LineChart()
-    bu_line.title = "BU Trend"
-    bu_line.y_axis.title = None
-    bu_line.x_axis.title = "INDEX POINTS"
-    bu_line.add_data(Reference(ws, min_col=base_col + 1, max_col=base_col + 2, min_row=2, max_row=max(3, len(bu_summary["sorted_values"]) + 2)), titles_from_data=True)
-    bu_line.set_categories(Reference(ws, min_col=base_col, min_row=3, max_row=max(3, len(bu_summary["sorted_values"]) + 2)))
-    style_line_chart(bu_line, "64748B", "DC2626")
-    ws.add_chart(bu_line, "E16")
-
-    wu_line = LineChart()
-    wu_line.title = "WU Trend"
-    wu_line.y_axis.title = None
-    wu_line.x_axis.title = "INDEX POINTS"
-    wu_line.add_data(Reference(ws, min_col=base_col + 5, max_col=base_col + 6, min_row=2, max_row=max(3, len(wu_summary["sorted_values"]) + 2)), titles_from_data=True)
-    wu_line.set_categories(Reference(ws, min_col=base_col + 4, min_row=3, max_row=max(3, len(wu_summary["sorted_values"]) + 2)))
-    style_line_chart(wu_line, "64748B", "DC2626")
-    ws.add_chart(wu_line, "J16")
+    ws["V9"] = "WU_bucket"
+    ws["W9"] = "WU_count"
+    for idx, (label, count) in enumerate(wu_distribution, start=10):
+        ws.cell(row=idx, column=22, value=label)
+        ws.cell(row=idx, column=23, value=count)
 
     bu_bar = BarChart()
-    bu_bar.title = "BU Distribution Range"
-    bu_bar.add_data(Reference(ws, min_col=base_col + 9, min_row=2, max_row=2 + len(bu_distribution)), titles_from_data=True)
-    bu_bar.set_categories(Reference(ws, min_col=base_col + 8, min_row=3, max_row=2 + len(bu_distribution)))
-    style_bar_chart(bu_bar, "64748B")
-    ws.add_chart(bu_bar, "E30")
+    bu_bar.title = "BU 분포 구간"
+    bu_bar.y_axis.title = "Count"
+    bu_bar.x_axis.title = "Range"
+    bu_bar.add_data(Reference(ws, min_col=20, min_row=9, max_row=9 + len(bu_distribution)), titles_from_data=True)
+    bu_bar.set_categories(Reference(ws, min_col=19, min_row=10, max_row=9 + len(bu_distribution)))
+    style_bar_chart(bu_bar, "DC2626")
+    ws.add_chart(bu_bar, "T14")
 
     wu_bar = BarChart()
-    wu_bar.title = "WU Distribution Range"
-    wu_bar.add_data(Reference(ws, min_col=base_col + 12, min_row=2, max_row=2 + len(wu_distribution)), titles_from_data=True)
-    wu_bar.set_categories(Reference(ws, min_col=base_col + 11, min_row=3, max_row=2 + len(wu_distribution)))
-    style_bar_chart(wu_bar, "64748B")
-    ws.add_chart(wu_bar, "J30")
+    wu_bar.title = "WU 분포 구간"
+    wu_bar.y_axis.title = "Count"
+    wu_bar.x_axis.title = "Range"
+    wu_bar.add_data(Reference(ws, min_col=23, min_row=9, max_row=9 + len(wu_distribution)), titles_from_data=True)
+    wu_bar.set_categories(Reference(ws, min_col=22, min_row=10, max_row=9 + len(wu_distribution)))
+    style_bar_chart(wu_bar, "16A34A")
+    ws.add_chart(wu_bar, "T35")
 
-    bu_pie = PieChart()
-    bu_pie.title = "BU Pass / Fail"
-    bu_pie.add_data(Reference(ws, min_col=base_col + 15, max_col=base_col + 16, min_row=3, max_row=3), from_rows=True)
-    bu_pie.set_categories(Reference(ws, min_col=base_col + 15, max_col=base_col + 16, min_row=2, max_row=2))
-    bu_pie.dataLabels = DataLabelList()
-    bu_pie.dataLabels.showPercent = True
-    style_pie_chart(bu_pie)
-    ws.add_chart(bu_pie, "E52")
+    write_kpi_table(
+        ws,
+        31,
+        20,
+        "Worst BU LotID",
+        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "black_uniformity")],
+    )
+    write_kpi_table(
+        ws,
+        31,
+        23,
+        "Worst WU LotID",
+        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "white_uniformity")],
+    )
 
-    wu_pie = PieChart()
-    wu_pie.title = "WU Pass / Fail"
-    wu_pie.add_data(Reference(ws, min_col=base_col + 15, max_col=base_col + 16, min_row=4, max_row=4), from_rows=True)
-    wu_pie.set_categories(Reference(ws, min_col=base_col + 15, max_col=base_col + 16, min_row=2, max_row=2))
-    wu_pie.dataLabels = DataLabelList()
-    wu_pie.dataLabels.showPercent = True
-    style_pie_chart(wu_pie)
-    ws.add_chart(wu_pie, "J52")
-
-    # Raw component data starts from BA
-    raw_start_col = 53  # BA
-    raw_headers = ["INDEX", "LOTID", "BU VALUE", "WU VALUE", "RESULT"]
-    ws.merge_cells(start_row=64, start_column=1, end_row=64, end_column=12)
-    ws.cell(row=64, column=1, value="RAW COMPONENT DATA (DETAILED INDEX)").fill = panel_fill
-    ws.cell(row=64, column=1).font = Font(size=11, bold=True, color="475569")
-    for idx, header in enumerate(raw_headers, start=raw_start_col):
-        c = ws.cell(row=65, column=idx, value=header)
-        c.fill = soft
-        c.font = Font(size=9, bold=True, color="64748B")
-    sorted_items = sorted(latest_measurements.items())
-    for row_no, (lot_id, m) in enumerate(sorted_items, start=66):
-        ws.cell(row=row_no, column=raw_start_col, value=row_no - 66)
-        ws.cell(row=row_no, column=raw_start_col + 1, value=lot_id)
-        ws.cell(row=row_no, column=raw_start_col + 2, value=to_float(m.get("black_uniformity")))
-        ws.cell(row=row_no, column=raw_start_col + 3, value=to_float(m.get("white_uniformity")))
-        ws.cell(row=row_no, column=raw_start_col + 4, value=m.get("judge", ""))
-
-    for col in range(1, 19):
-        ws.column_dimensions[get_column_letter(col)].width = 13
-    ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 10
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["J"].width = 14
-    ws.column_dimensions["N"].width = 14
-    # raw data와 차트 원본 데이터를 사용자가 직접 확인할 수 있도록 숨김 처리하지 않는다.
+    ws.column_dimensions["A"].width = 22
+    for col in ("B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "S", "T", "V", "W"):
+        ws.column_dimensions[col].width = 12
 
 
 def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tuple[dict[str, Path], list[dict]]:
@@ -704,19 +598,18 @@ def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tu
         current = latest_by_lotid.get(lot_id)
         is_latest = False
 
-        # 파일 기준 시간 키 획득
-        f_time_key = folder_time_key(p)[0]
-
         if current is None or folder_time_key(p) > folder_time_key(current):
             latest_by_lotid[lot_id] = p
             is_latest = True
 
+        created_ts = p.stat().st_ctime
+        modified_ts = p.stat().st_mtime
         rows.append(
             {
                 "lot_id": lot_id,
                 "folder_path": str(p),
-                "created_time": format_ts(p.stat().st_ctime),
-                "modified_time": format_ts(f_time_key), # 파일 기준 수정 시간 기록
+                "created_time": format_ts(created_ts),
+                "modified_time": format_ts(modified_ts),
                 "selected_latest_at_scan_time": "TRUE" if is_latest else "FALSE",
             }
         )

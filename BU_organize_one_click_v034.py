@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import io
 import re
 import shutil
@@ -55,7 +55,6 @@ class PipelineCancelled(Exception):
 
 
 def get_resized_xl_image(image_path: Path, max_width_px: int) -> XLImage | None:
-    # 엑셀 파일 용량 다이어트를 위해 삽입 전에 이미지를 리사이징하여 BytesIO로 반환
     if not image_path.exists():
         return None
     try:
@@ -67,7 +66,6 @@ def get_resized_xl_image(image_path: Path, max_width_px: int) -> XLImage | None:
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             
             img_byte_arr = io.BytesIO()
-            # 이미지 형식을 유지하되, 리사이징 시에는 최적화된 포맷으로 저장
             img.save(img_byte_arr, format="PNG")
             img_byte_arr.seek(0)
             return XLImage(img_byte_arr)
@@ -77,7 +75,6 @@ def get_resized_xl_image(image_path: Path, max_width_px: int) -> XLImage | None:
 
 
 def print_progress(label: str, current: int, total: int, done: bool = False) -> None:
-    # 진행률 표시 공통 함수
     if total <= 0:
         return
     percent = (current / total) * 100
@@ -90,11 +87,9 @@ def ensure_not_cancelled(cancel_check=None) -> None:
 
 
 def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
-    # 동일 폴더명이 이미 있으면 _1, _2 ... 를 붙여 새 경로를 만든다.
     candidate = base_dir / folder_name
     if not candidate.exists():
         return candidate
-
     idx = 1
     while True:
         candidate = base_dir / f"{folder_name}_{idx}"
@@ -104,10 +99,8 @@ def unique_folder_path(base_dir: Path, folder_name: str) -> Path:
 
 
 def unique_file_path(path: Path) -> Path:
-    # 동일 파일명이 이미 있으면 파일명 뒤에 _1, _2 ... 를 붙여 저장 경로를 만든다.
     if not path.exists():
         return path
-
     parent = path.parent
     stem = path.stem
     suffix = path.suffix
@@ -120,7 +113,6 @@ def unique_file_path(path: Path) -> Path:
 
 
 def ask_int(prompt: str, default: int) -> int:
-    # 숫자 입력(엔터면 기본값 사용)
     raw = input(f"{prompt} (기본값 {default}): ").strip().replace('"', "")
     if not raw:
         return default
@@ -132,8 +124,6 @@ def ask_path(prompt: str) -> Path:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
-    # 최신 폴더 비교 기준: 해당 폴더 '직계' 이미지 파일들 중 가장 최신 수정시각
-    # 상위 폴더가 잘못 LotID 후보로 잡히지 않도록 하위 폴더는 보지 않는다.
     try:
         file_mtimes = [
             f.stat().st_mtime
@@ -145,13 +135,11 @@ def folder_time_key(path: Path) -> tuple[float, float]:
             return (latest_file_mtime, latest_file_mtime)
     except Exception:
         pass
-
     stat = path.stat()
     return (stat.st_mtime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
-    # LotID 폴더 판정 규칙: 해당 폴더 '직계'에 이미지 파일이 1개 이상 있는 디렉터리
     if not path.is_dir():
         return False
     try:
@@ -164,17 +152,14 @@ def is_lotid_folder(path: Path) -> bool:
 
 
 def format_ts(ts: float) -> str:
-    # CSV 가독성을 위해 타임스탬프를 날짜 문자열로 변환
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_lmk_time(value: str) -> datetime:
-    # LMK 로그 시간 형식: 2026.02.24 09:30:51
     return datetime.strptime(value.strip(), "%Y.%m.%d %H:%M:%S")
 
 
 def format_measurement_value(value: str) -> str:
-    # 엑셀에는 핵심 수치만 간단히 넣는다.
     if value is None:
         return ""
     return str(value).strip()
@@ -198,10 +183,8 @@ def to_float(value) -> float | None:
 
 
 def iter_csv_dict_rows(csv_path: Path):
-    # CSV 인코딩이 파일마다 다를 수 있어서 순차적으로 시도한다.
     encodings = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
     last_error = None
-
     for encoding in encodings:
         try:
             with csv_path.open("r", encoding=encoding, newline="") as f:
@@ -210,7 +193,6 @@ def iter_csv_dict_rows(csv_path: Path):
             return rows
         except UnicodeDecodeError as exc:
             last_error = exc
-
     raise UnicodeDecodeError(
         getattr(last_error, "encoding", "unknown"),
         getattr(last_error, "object", b""),
@@ -221,7 +203,6 @@ def iter_csv_dict_rows(csv_path: Path):
 
 
 def collect_latest_measurements(data_root: Path, cancel_check=None) -> tuple[dict[str, dict], list[dict]]:
-    # 여러 LMK6DataLog.csv를 재귀 탐색해 Panel_ID 기준 최신 행만 남긴다.
     csv_files = sorted(data_root.rglob(DATA_FILE_PATTERN))
     total_files = len(csv_files)
     print(f"\n[4/7] 측정 CSV 스캔 시작 (대상 파일: {total_files}개)")
@@ -331,13 +312,11 @@ def distribution_match(label: str, value: float, lower: float, upper: float) -> 
     return lower <= value < upper
 
 
-def build_distribution(values: list[float], bins: list[tuple[str, float, float]]) -> list[tuple[str, int, float]]:
-    counts: list[tuple[str, int, float]] = []
-    total = len(values)
+def build_distribution(values: list[float], bins: list[tuple[str, float, float]]) -> list[tuple[str, int]]:
+    counts: list[tuple[str, int]] = []
     for label, lower, upper in bins:
         count = sum(1 for value in values if distribution_match(label, value, lower, upper))
-        ratio = 0.0 if total == 0 else (count / total) * 100
-        counts.append((label, count, ratio))
+        counts.append((label, count))
     return counts
 
 
@@ -367,8 +346,8 @@ def write_kpi_table(ws, start_row: int, start_col: int, title: str, rows: list[t
 def style_line_chart(chart: LineChart, value_color: str, spec_color: str) -> None:
     chart.style = 2
     chart.legend = None
-    chart.height = 6.6
-    chart.width = 8.8
+    chart.height = 7.0 
+    chart.width = 9.8  
     chart.smooth = True
     chart.plotVisOnly = False
     if len(chart.ser) >= 1:
@@ -385,8 +364,8 @@ def style_line_chart(chart: LineChart, value_color: str, spec_color: str) -> Non
 def style_bar_chart(chart: BarChart, fill_color: str) -> None:
     chart.style = 11
     chart.legend = None
-    chart.height = 6.8
-    chart.width = 9.2
+    chart.height = 7.0 
+    chart.width = 9.8 
     chart.plotVisOnly = False
     if len(chart.ser) >= 1:
         chart.ser[0].graphicalProperties.solidFill = fill_color
@@ -424,7 +403,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     white_fill = PatternFill("solid", fgColor="FFFFFF")
     border_fill = PatternFill("solid", fgColor="CBD5E1")
 
-    for col in range(1, 19):
+    for col in range(1, 20):
         ws.cell(row=1, column=col).fill = header_fill
 
     ws.merge_cells("A1:F2")
@@ -453,7 +432,6 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     write_card(ws, "K4", "PASS RATE", f"{pass_rate:.1f}%", "OVERALL QUALITY", "1D4ED8")
     write_card(ws, "N4", "TOTAL LOTID", f"{total_count}", "BATCHES", "0F766E")
 
-    # Left navigation mimic
     ws.merge_cells("A4:C6")
     ws["A4"] = "Unit 04\nQUALITY CONTROL"
     ws["A4"].fill = white_fill
@@ -466,7 +444,6 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
         ws.cell(row=row, column=1).font = Font(size=11, bold=True, color="334155")
         ws.cell(row=row, column=1).fill = white_fill if label != "Overview" else PatternFill("solid", fgColor="F8FAFC")
 
-    # Metric summary panel
     ws.merge_cells("E8:L9")
     ws["E8"] = "Metric Summary"
     ws["E8"].fill = panel_fill
@@ -492,7 +469,6 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
             cell.font = Font(size=12 if offset == 5 else 11, bold=(offset == 5), color="334155")
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # Worst cards
     def draw_worst_table(start_row: int, title: str, rows: list[tuple[str, object]]) -> None:
         ws.merge_cells(start_row=start_row, start_column=13, end_row=start_row, end_column=18)
         head = ws.cell(row=start_row, column=13, value=title)
@@ -511,7 +487,6 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     draw_worst_table(8, "WORST BU LOTID", [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "black_uniformity", 3)])
     draw_worst_table(14, "WORST WU LOTID", [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "white_uniformity", 3)])
 
-    # Range distributions as simple card tables
     bu_bins = [
         ("<50%", 0, 50),
         ("50-52%", 50, 52),
@@ -532,40 +507,52 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_distribution = build_distribution(bu_summary["sorted_values"], bu_bins)
     wu_distribution = build_distribution(wu_summary["sorted_values"], wu_bins)
 
-    def draw_distribution_card(start_row: int, start_col: int, title: str, rows: list[tuple[str, int, float]]) -> None:
-        ws.merge_cells(start_row=start_row, start_column=start_col, end_row=start_row, end_column=start_col + 3)
+    def draw_distribution_card(start_row: int, start_col: int, title: str, rows: list[tuple[str, int]]) -> None:
+        total_count = sum(count for _, count in rows)
+        ws.merge_cells(start_row=start_row, start_column=start_col, end_row=start_row, end_column=start_col+5)
         ws.cell(row=start_row, column=start_col, value=title).fill = white_fill
         ws.cell(row=start_row, column=start_col).font = Font(size=10, bold=True, color="475569")
         header_row = start_row + 1
         header_specs = (
             (start_col, "RANGE", "475569"),
-            (start_col + 1, "DISTRIBUTION", "475569"),
-            (start_col + 3, "COUNT", "475569"),
+            (start_col+2, "DISTRIBUTION(%)", "475569"),
+            (start_col+5, "COUNT", "475569"),
         )
         for col, text, color in header_specs:
             cell = ws.cell(row=header_row, column=col, value=text)
             cell.font = Font(size=8, bold=True, color=color)
             cell.alignment = Alignment(horizontal="left", vertical="center")
-        for idx, (label, count, ratio) in enumerate(rows, start=start_row + 2):
+            
+        for idx, (label, count) in enumerate(rows, start=start_row + 2):
             ws.cell(row=idx, column=start_col, value=label).font = Font(size=9, bold=True, color="475569")
-            ws.merge_cells(start_row=idx, start_column=start_col + 1, end_row=idx, end_column=start_col + 2)
-            if count <= 0:
-                distribution_text = ""
+            
+            # 비율 계산 (백분율에 비례하여 블록 출력. 전체 10칸 기준)
+            if total_count > 0 and count > 0:
+                percent = count / total_count
+                legend_strength = max(1, round(percent * 10)) 
+                bar_text = "▇" * legend_strength
+                percent_text = f" ({percent*100:.1f}%)"
             else:
-                bar_units = max(1, round(ratio / 5))
-                distribution_text = f"{'▇' * bar_units} {ratio:.1f}%"
-            bar_cell = ws.cell(row=idx, column=start_col + 1, value=distribution_text)
+                bar_text = ""
+                percent_text = " (0.0%)"
+                
+            bar_cell = ws.cell(row=idx, column=start_col+2, value=bar_text + percent_text)
             bar_cell.font = Font(size=9, color="64748B", bold=True)
             bar_cell.alignment = Alignment(horizontal="left", vertical="center")
-            count_cell = ws.cell(row=idx, column=start_col + 3, value=count)
+            
+            count_cell = ws.cell(row=idx, column=start_col+5, value=f"{count}")
             count_cell.font = Font(size=9, bold=True, color="64748B")
             count_cell.alignment = Alignment(horizontal="right", vertical="center")
-    distribution_row = 41
-    draw_distribution_card(distribution_row, 5, "BU RANGE DISTRIBUTION", bu_distribution)
-    draw_distribution_card(distribution_row, 10, "WU RANGE DISTRIBUTION", wu_distribution)
 
-    # Hidden chart source data at BI+
-    base_col = 61  # BI
+    # 차트와 표 나란히 배치를 위해 시작 행/열 조정
+    chart_start_row = 16
+    bar_chart_start_row = 31
+    dist_table_start_row = 48 
+
+    draw_distribution_card(dist_table_start_row, 5, "BU RANGE DISTRIBUTION", bu_distribution)
+    draw_distribution_card(dist_table_start_row, 10, "WU RANGE DISTRIBUTION", wu_distribution)
+
+    base_col = 61  
     ws.cell(row=2, column=base_col, value="BU_index")
     ws.cell(row=2, column=base_col + 1, value="BU_value")
     ws.cell(row=2, column=base_col + 2, value="BU_spec")
@@ -584,12 +571,12 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
 
     ws.cell(row=2, column=base_col + 8, value="BU_bucket")
     ws.cell(row=2, column=base_col + 9, value="BU_count")
-    for idx, (label, count, ratio) in enumerate(bu_distribution, start=3):
+    for idx, (label, count) in enumerate(bu_distribution, start=3):
         ws.cell(row=idx, column=base_col + 8, value=label)
         ws.cell(row=idx, column=base_col + 9, value=count)
     ws.cell(row=2, column=base_col + 11, value="WU_bucket")
     ws.cell(row=2, column=base_col + 12, value="WU_count")
-    for idx, (label, count, ratio) in enumerate(wu_distribution, start=3):
+    for idx, (label, count) in enumerate(wu_distribution, start=3):
         ws.cell(row=idx, column=base_col + 11, value=label)
         ws.cell(row=idx, column=base_col + 12, value=count)
 
@@ -610,7 +597,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_line.add_data(Reference(ws, min_col=base_col + 1, max_col=base_col + 2, min_row=2, max_row=max(3, len(bu_summary["sorted_values"]) + 2)), titles_from_data=True)
     bu_line.set_categories(Reference(ws, min_col=base_col, min_row=3, max_row=max(3, len(bu_summary["sorted_values"]) + 2)))
     style_line_chart(bu_line, "64748B", "DC2626")
-    ws.add_chart(bu_line, "E16")
+    ws.add_chart(bu_line, f"E{chart_start_row}")
 
     wu_line = LineChart()
     wu_line.title = "WU Trend"
@@ -619,22 +606,23 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     wu_line.add_data(Reference(ws, min_col=base_col + 5, max_col=base_col + 6, min_row=2, max_row=max(3, len(wu_summary["sorted_values"]) + 2)), titles_from_data=True)
     wu_line.set_categories(Reference(ws, min_col=base_col + 4, min_row=3, max_row=max(3, len(wu_summary["sorted_values"]) + 2)))
     style_line_chart(wu_line, "64748B", "DC2626")
-    ws.add_chart(wu_line, "J16")
+    ws.add_chart(wu_line, f"J{chart_start_row}")
 
     bu_bar = BarChart()
     bu_bar.title = "BU Distribution Range"
     bu_bar.add_data(Reference(ws, min_col=base_col + 9, min_row=2, max_row=2 + len(bu_distribution)), titles_from_data=True)
     bu_bar.set_categories(Reference(ws, min_col=base_col + 8, min_row=3, max_row=2 + len(bu_distribution)))
     style_bar_chart(bu_bar, "64748B")
-    ws.add_chart(bu_bar, "E30")
+    ws.add_chart(bu_bar, f"E{bar_chart_start_row}")
 
     wu_bar = BarChart()
     wu_bar.title = "WU Distribution Range"
     wu_bar.add_data(Reference(ws, min_col=base_col + 12, min_row=2, max_row=2 + len(wu_distribution)), titles_from_data=True)
     wu_bar.set_categories(Reference(ws, min_col=base_col + 11, min_row=3, max_row=2 + len(wu_distribution)))
     style_bar_chart(wu_bar, "64748B")
-    ws.add_chart(wu_bar, "J30")
+    ws.add_chart(wu_bar, f"J{bar_chart_start_row}")
 
+    pie_chart_start_row = 60
     bu_pie = PieChart()
     bu_pie.title = "BU Pass / Fail"
     bu_pie.add_data(Reference(ws, min_col=base_col + 15, max_col=base_col + 16, min_row=3, max_row=3), from_rows=True)
@@ -642,7 +630,7 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     bu_pie.dataLabels = DataLabelList()
     bu_pie.dataLabels.showPercent = True
     style_pie_chart(bu_pie)
-    ws.add_chart(bu_pie, "E52")
+    ws.add_chart(bu_pie, f"E{pie_chart_start_row}")
 
     wu_pie = PieChart()
     wu_pie.title = "WU Pass / Fail"
@@ -651,27 +639,27 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     wu_pie.dataLabels = DataLabelList()
     wu_pie.dataLabels.showPercent = True
     style_pie_chart(wu_pie)
-    ws.add_chart(wu_pie, "J52")
+    ws.add_chart(wu_pie, f"J{pie_chart_start_row}")
 
-    # Raw component data starts from BA
-    raw_start_col = 53  # BA
+    raw_start_row = 75
+    raw_start_col = 53  
     raw_headers = ["INDEX", "LOTID", "BU VALUE", "WU VALUE", "RESULT"]
-    ws.merge_cells(start_row=64, start_column=1, end_row=64, end_column=12)
-    ws.cell(row=64, column=1, value="RAW COMPONENT DATA (DETAILED INDEX)").fill = panel_fill
-    ws.cell(row=64, column=1).font = Font(size=11, bold=True, color="475569")
+    ws.merge_cells(start_row=raw_start_row, start_column=1, end_row=raw_start_row, end_column=12)
+    ws.cell(row=raw_start_row, column=1, value="RAW COMPONENT DATA (DETAILED INDEX)").fill = panel_fill
+    ws.cell(row=raw_start_row, column=1).font = Font(size=11, bold=True, color="475569")
     for idx, header in enumerate(raw_headers, start=raw_start_col):
-        c = ws.cell(row=65, column=idx, value=header)
+        c = ws.cell(row=raw_start_row + 1, column=idx, value=header)
         c.fill = soft
         c.font = Font(size=9, bold=True, color="64748B")
     sorted_items = sorted(latest_measurements.items())
-    for row_no, (lot_id, m) in enumerate(sorted_items, start=66):
-        ws.cell(row=row_no, column=raw_start_col, value=row_no - 66)
+    for row_no, (lot_id, m) in enumerate(sorted_items, start=raw_start_row + 2):
+        ws.cell(row=row_no, column=raw_start_col, value=row_no - (raw_start_row + 1))
         ws.cell(row=row_no, column=raw_start_col + 1, value=lot_id)
         ws.cell(row=row_no, column=raw_start_col + 2, value=to_float(m.get("black_uniformity")))
         ws.cell(row=row_no, column=raw_start_col + 3, value=to_float(m.get("white_uniformity")))
         ws.cell(row=row_no, column=raw_start_col + 4, value=m.get("judge", ""))
 
-    for col in range(1, 19):
+    for col in range(1, 20):
         ws.column_dimensions[get_column_letter(col)].width = 13
     ws.column_dimensions["A"].width = 16
     ws.column_dimensions["B"].width = 12
@@ -680,11 +668,9 @@ def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) 
     ws.column_dimensions["F"].width = 12
     ws.column_dimensions["J"].width = 14
     ws.column_dimensions["N"].width = 14
-    # raw data와 차트 원본 데이터를 사용자가 직접 확인할 수 있도록 숨김 처리하지 않는다.
 
 
 def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tuple[dict[str, Path], list[dict]]:
-    # 전체 폴더를 훑어서 LotID별 최신 폴더 1개만 남긴다.
     latest_by_lotid: dict[str, Path] = {}
     rows: list[dict] = []
 
@@ -704,7 +690,6 @@ def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tu
         current = latest_by_lotid.get(lot_id)
         is_latest = False
 
-        # 파일 기준 시간 키 획득
         f_time_key = folder_time_key(p)[0]
 
         if current is None or folder_time_key(p) > folder_time_key(current):
@@ -716,7 +701,7 @@ def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tu
                 "lot_id": lot_id,
                 "folder_path": str(p),
                 "created_time": format_ts(p.stat().st_ctime),
-                "modified_time": format_ts(f_time_key), # 파일 기준 수정 시간 기록
+                "modified_time": format_ts(f_time_key), 
                 "selected_latest_at_scan_time": "TRUE" if is_latest else "FALSE",
             }
         )
@@ -729,7 +714,6 @@ def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tu
 
 
 def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path, cancel_check=None) -> None:
-    # 최종 선택된 LotID 폴더만 결과 폴더로 복사
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -747,7 +731,6 @@ def copy_latest_folders(latest_by_lotid: dict[str, Path], output_root: Path, can
 
 
 def write_merge_report(rows: list[dict], output_root: Path) -> Path:
-    # 병합(merge) 판단 결과를 CSV로 저장
     report_path = output_root / "merge_report.csv"
     fieldnames = [
         "lot_id",
@@ -767,7 +750,6 @@ def write_merge_report(rows: list[dict], output_root: Path) -> Path:
 
 
 def find_non_black_bbox(img: Image.Image, threshold: int = 12):
-    # 검은 배경(저밝기)을 제외한 영역의 최소 사각형(BBox) 검출 (NumPy 최적화 버전)
     arr = np.array(img.convert("L"))
     rows = np.any(arr > threshold, axis=1)
     cols = np.any(arr > threshold, axis=0)
@@ -789,25 +771,19 @@ def load_cv2_image(image_path: Path):
 
 
 def get_refined_product_bbox(image_path: Path, margin_px: int = 10):
-    # v0.2: Canny Edge + Dilation + Contour Fitting (More "fit" approach)
     img = load_cv2_image(image_path)
     if img is None:
         return None
 
-    # 1. Gray conversion & Blurring (Noise reduction)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 2. Canny Edge Detection (Lowered thresholds to catch fainter edges)
     edges = cv2.Canny(blurred, 15, 50)
     kernel = np.ones((7, 7), np.uint8)
-    # Increased dilation to merge and expand the edge area
     dilated = cv2.dilate(edges, kernel, iterations=2)
 
-    # 3. Find Contours and Select the Largest one
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        # Fallback to simple threshold if edge detection fails
         _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -815,8 +791,6 @@ def get_refined_product_bbox(image_path: Path, margin_px: int = 10):
 
     max_cnt = max(contours, key=cv2.contourArea)
     
-    # 4. Get the minimum area rectangle (can be rotated)
-    # 회전된 사각형의 4개 점을 구한 뒤, 이에 맞는 정렬된 BBox를 생성
     rect = cv2.minAreaRect(max_cnt)
     box = cv2.boxPoints(rect)
     box = np.int32(box)
@@ -827,31 +801,22 @@ def get_refined_product_bbox(image_path: Path, margin_px: int = 10):
     x_min, x_max = np.min(x_coords), np.max(x_coords)
     y_min, y_max = np.min(y_coords), np.max(y_coords)
 
-    # 5. Content-Aware Trimming (Specifically for the Left edge in v0.2.3)
-    # 엣지로 잡은 영역 내에서 실제 휘도 변화를 분석하여 배경(B열)을 깎아냄
     gray_roi = gray[y_min:y_max, x_min:x_max]
     if gray_roi.size > 0:
-        # 가로 방향으로 각 열(column)의 평균 밝기 계산
         col_averages = np.mean(gray_roi, axis=0)
-        
-        # 제품이 시작되는 지점 찾기 (배경 노이즈보다 높은 유의미한 밝기 지점)
-        # 전체 ROI 평균의 50% 또는 최소 임계값(예: 15) 중 높은 쪽을 기준으로 삼음
         roi_mean = np.mean(col_averages)
         content_threshold = max(15, roi_mean * 0.5)
         
-        # 왼쪽부터 스캔하여 처음으로 threshold를 넘는 지점 탐색
         actual_left_offset = 0
         for i, avg in enumerate(col_averages):
             if avg > content_threshold:
                 actual_left_offset = i
                 break
         
-        # x_min 보정 (제품 시작점으로 밀착)
         x_min_refined = x_min + actual_left_offset
     else:
         x_min_refined = x_min
 
-    # 6. Apply final coordinates (Expand logic from v0.2.1 kept for flexibility, but margin is 0)
     x_new = max(0, x_min_refined - margin_px)
     y_new = max(0, y_min - margin_px)
     x_end = min(img.shape[1], x_max + margin_px)
@@ -864,7 +829,6 @@ def get_refined_product_bbox(image_path: Path, margin_px: int = 10):
 
 
 def add_padding(box, w: int, h: int, pad: int):
-    # 잘림 방지를 위해 크롭 박스에 여백(padding) 추가
     left, top, right, bottom = box
     return (
         max(0, left - pad),
@@ -875,8 +839,6 @@ def add_padding(box, w: int, h: int, pad: int):
 
 
 def parse_lot_kind(stem: str):
-    # 파일명에서 LotID와 BU/WU를 파싱
-    # 패턴 불일치 시 kind=UNKNOWN으로 처리
     m = LOT_PATTERN.match(stem)
     if not m:
         return stem, "UNKNOWN"
@@ -927,7 +889,6 @@ def analyze_bu_grid(
         rgb_img = img.convert("RGB")
         width, height = rgb_img.size
         
-        # Crop logic
         source_box = (0, 0, width, height)
         if crop_box is not None:
             left, top, right, bottom = crop_box
@@ -945,10 +906,7 @@ def analyze_bu_grid(
             source_box = (source_box[0] + left, source_box[1] + top, source_box[0] + right, source_box[1] + bottom)
             width, height = rgb_img.size
 
-        # Convert to NumPy for vectorized operations
         arr = np.array(rgb_img, dtype=np.float32)
-        # Compute luminance: (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
-        # arr shape: (H, W, 3)
         luminance_arr = (0.2126 * arr[:, :, 0]) + (0.7152 * arr[:, :, 1]) + (0.0722 * arr[:, :, 2])
         
         valid_mask = luminance_arr > threshold
@@ -980,14 +938,12 @@ def analyze_bu_grid(
                 cell_rgb = arr[y_start:y_end, x_start:x_end]
                 cell_valid_mask = valid_mask[y_start:y_end, x_start:x_end]
                 
-                # Content ratio based on original pixels in cell
                 total_cell_px = cell_lum.size
                 if total_cell_px > 0:
                     ratio = np.count_nonzero(cell_valid_mask) / total_cell_px
                     cell_content_ratio[r][c] = ratio
                     cell_has_content[r][c] = ratio >= PRODUCT_CELL_CONTENT_RATIO_MIN
                 
-                # Use all pixels for basic averages as fallback if needed, but mainly focused on valid ones
                 cell_averages[r][c] = np.mean(cell_lum)
                 cell_rgb_averages[r][c] = tuple(np.mean(cell_rgb, axis=(0, 1)))
                 
@@ -1000,7 +956,6 @@ def analyze_bu_grid(
                     delta_values.append(delta)
                     valid_cells += 1
                     
-                    # Compute red/white score for the average RGB of valid pixels
                     avg_rgb = np.mean(cell_rgb[cell_valid_mask], axis=0)
                     cell_red_white_scores[r][c] = compute_red_white_score(avg_rgb)
 
@@ -1170,7 +1125,6 @@ def build_worst_point_overlay(image_path: Path, analysis: dict, overlay_path: Pa
         width, height = overlay.size
         source_box = analysis.get("source_box") or (0, 0, width, height)
 
-        # worst point 후보로 인정되는 제품 내부 안전영역만 녹색 사각형으로 표시
         draw.rectangle(get_worst_point_candidate_rect(analysis, width, height), outline=(0, 220, 90), width=3)
 
         x_edges = analysis.get("x_edges", [])
@@ -1286,7 +1240,6 @@ def build_summary_worst_heatmap(
     cmap = plt.cm.get_cmap("magma")
     colors = cmap(0.35 + (norm_counts * 0.65))
 
-    # 바깥 glow
     glow_outer = ax.scatter(
         df["X"],
         df["Y"],
@@ -1298,7 +1251,6 @@ def build_summary_worst_heatmap(
     )
     glow_outer.set_clip_path(clip_rect)
 
-    # 중간 glow
     glow_mid = ax.scatter(
         df["X"],
         df["Y"],
@@ -1310,7 +1262,6 @@ def build_summary_worst_heatmap(
     )
     glow_mid.set_clip_path(clip_rect)
 
-    # 중심 원형 포인트
     core = ax.scatter(
         df["X"],
         df["Y"],
@@ -1677,7 +1628,6 @@ def write_bu_analysis_excel(
 
 
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int, cancel_check=None):
-    # merge 결과 폴더를 대상으로 자동 크롭 실행
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1755,8 +1705,6 @@ def write_excel(
     image_width_px: int = 240,
     cancel_check=None,
 ):
-    # 결과 시트: LotID별 BU/WU 이미지 배치 (사용자 입력 컬럼은 공란 유지)
-    # 상세 시트: 경로/중복 정보 정리 (이미지 없음)
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
@@ -1905,7 +1853,6 @@ def write_excel(
 
 
 def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int, cancel_check=None) -> dict:
-    # GUI/CLI 공용 실행 함수
     merged_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1"
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
     excel_path = cropped_root / "crop_report.xlsx"
@@ -1984,12 +1931,6 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
 
 
 def main():
-    # 원클릭 실행 순서:
-    # 1) 사용자 입력 수집
-    # 2) LotID 최신 폴더 취합(merge)
-    # 3) 측정 데이터 최신값 집계
-    # 4) merge 결과를 자동 크롭
-    # 5) 엑셀 리포트 생성
     print("\n--- BU Organize One Click v1 ---")
     integrated_root = ask_path("1) 이미지 통합 폴더 경로: ")
     if not integrated_root.exists() or not integrated_root.is_dir():

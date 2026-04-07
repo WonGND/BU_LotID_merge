@@ -132,34 +132,29 @@ def ask_path(prompt: str) -> Path:
 
 
 def folder_time_key(path: Path) -> tuple[float, float]:
-    # 최신 폴더 비교 기준: 폴더 내(하위 포함) 모든 이미지 파일들 중 가장 최신 수정시각
-    # 폴더 자체의 수정시간은 신뢰할 수 없으므로 무시하고, 오직 이미지 파일의 시간만 사용
+    # 최신 폴더 비교 기준: 폴더 직계에 있는 이미지 파일들 중 가장 최신 수정시각
     try:
-        # rglob을 사용하여 하위 폴더의 모든 이미지를 탐색
         file_mtimes = [
             f.stat().st_mtime
-            for f in path.rglob("*")
+            for f in path.iterdir()
             if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS
         ]
         if file_mtimes:
             latest_file_mtime = max(file_mtimes)
-            # 이미지 파일의 시간을 1순위로 비교
             return (latest_file_mtime, latest_file_mtime)
     except Exception:
         pass
 
-    # 이미지가 하나도 없는 경우에만 폴더 시간을 보조적으로 사용
     stat = path.stat()
     return (stat.st_mtime, stat.st_mtime)
 
 
 def is_lotid_folder(path: Path) -> bool:
-    # LotID 폴더 판정 규칙: 이미지 파일이 1개 이상 있는 디렉터리 (하위 포함)
+    # LotID 폴더 판정 규칙: 해당 폴더 '직계'에 이미지 파일이 1개 이상 있는 디렉터리 (v1 방식)
     if not path.is_dir():
         return False
     try:
-        # 하위 폴더까지 뒤져서 이미지 파일이 하나라도 있는지 확인
-        for f in path.rglob("*"):
+        for f in path.iterdir():
             if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
                 return True
     except Exception:
@@ -403,197 +398,139 @@ def pick_worst_lotids(latest_measurements: dict[str, dict], key: str, limit: int
     return rows[:limit]
 
 
-def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict]) -> None:
-    ws = wb.create_sheet("시각화")
+def add_visualization_sheet(wb: Workbook, latest_measurements: dict[str, dict], excel_path: Path) -> None:
+    # --- [Historical Logging] ---
+    history_file = excel_path.parent / "TOVIS_BU_Historical_Trend.xlsx"
+    now = datetime.now()
+    
+    bu_vals = [to_float(m.get("black_uniformity")) for m in latest_measurements.values() if to_float(m.get("black_uniformity")) is not None]
+    wu_vals = [to_float(m.get("white_uniformity")) for m in latest_measurements.values() if to_float(m.get("white_uniformity")) is not None]
+    pass_count = sum(1 for m in latest_measurements.values() if m.get("judge") == "OK")
+    total_lot = len(latest_measurements)
+    
+    new_data = {
+        "Date": now.strftime("%Y-%m-%d %H:%M"),
+        "Total_Lot": total_lot,
+        "Pass_Rate": round(pass_count / max(1, total_lot) * 100, 1),
+        "BU_Avg": round(np.mean(bu_vals), 2) if bu_vals else 0,
+        "WU_Avg": round(np.mean(wu_vals), 2) if wu_vals else 0
+    }
+    
+    try:
+        if history_file.exists():
+            history_df = pd.read_excel(history_file)
+            history_df = pd.concat([history_df, pd.DataFrame([new_data])], ignore_index=True)
+        else:
+            history_df = pd.DataFrame([new_data])
+        history_df.to_excel(history_file, index=False)
+    except Exception as e:
+        print(f"⚠️ Historical Log 업데이트 실패: {e}")
+        history_df = pd.DataFrame([new_data])
+
+    # --- [Dashboard V2 Design] ---
+    ws = wb.create_sheet("시각화_V2", 0)
     ws.sheet_view.showGridLines = False
-    ws.merge_cells("A1:H2")
-    ws["A1"] = "BU / WU Measurement Dashboard"
-    ws["A1"].font = Font(size=20, bold=True, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor="111827")
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws["I1"] = datetime.now().strftime("Updated: %Y-%m-%d %H:%M:%S")
-    ws["I1"].font = Font(size=10, color="6B7280")
+    
+    # 1. Dark Header (스크린샷 스타일)
+    dark_fill = PatternFill("solid", fgColor="111827")
+    white_font = Font(color="FFFFFF", size=20, bold=True)
+    ws.merge_cells("A1:L3")
+    header_cell = ws["A1"]
+    header_cell.value = "   Manufacturing Intelligence | Quality Control Dashboard"
+    header_cell.fill = dark_fill
+    header_cell.font = white_font
+    header_cell.alignment = Alignment(horizontal="left", vertical="center")
+    
+    # 2. Weekday & Date
+    weekday_display = now.strftime("%A, %B %d, %Y").upper()
+    ws.merge_cells("A4:F4")
+    ws["A4"] = f"REPORT DATE: {weekday_display}"
+    ws["A4"].font = Font(color="6B7280", size=10, bold=True)
+    ws["I1"] = f"Last Sync: {now.strftime('%H:%M:%S')}"
+    ws["I1"].font = Font(color="94A3B8", size=9)
+    ws["I1"].alignment = Alignment(horizontal="right", vertical="center")
 
     bu_summary = build_metric_summary(latest_measurements, "black_uniformity", BU_SPEC_MIN)
     wu_summary = build_metric_summary(latest_measurements, "white_uniformity", WU_SPEC_MIN)
-    total_count = max(bu_summary["count"], wu_summary["count"])
 
-    write_card(ws, "A4", "전체 LotID", total_count, "최신 측정 기준", "0F766E")
-    write_card(ws, "D4", "BU Fail", bu_summary["fail_count"], f"Spec {BU_SPEC_MIN}", "B91C1C")
-    write_card(ws, "G4", "WU Fail", wu_summary["fail_count"], f"Spec {WU_SPEC_MIN}", "7C2D12")
-    write_card(ws, "J4", "Pass Rate", f"{(0 if total_count == 0 else ((bu_summary['pass_count'] + wu_summary['pass_count']) / max(1, bu_summary['count'] + wu_summary['count']) * 100)):.1f}%", "BU+WU combined", "1D4ED8")
+    # 3. KPI Cards
+    write_card(ws, "A6", "BU FAIL", f"{bu_summary['fail_count']} UNITS", f"SPEC < {BU_SPEC_MIN}", "DC2626")
+    write_card(ws, "D6", "WU FAIL", f"{wu_summary['fail_count']} UNITS", f"SPEC < {WU_SPEC_MIN}", "D97706")
+    write_card(ws, "G6", "PASS RATE", f"{(pass_count/max(1, total_lot)*100):.1f}%", "Overall Quality", "1D4ED8")
+    write_card(ws, "J6", "TOTAL LOTID", f"{total_lot} BATCHES", "Current Session", "0F766E")
 
-    ws["A8"] = "Metric Summary"
-    ws["A8"].font = Font(size=13, bold=True, color="111827")
-    ws["A9"] = "지표"
-    ws["B9"] = "Spec Min"
-    ws["C9"] = "Count"
-    ws["D9"] = "Pass"
-    ws["E9"] = "Fail"
-    ws["F9"] = "Min"
-    ws["G9"] = "Avg"
-    ws["H9"] = "Median"
-    ws["I9"] = "Max"
-
-    header_fill = PatternFill("solid", fgColor="1F2937")
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws["9:9"]:
-        cell.fill = header_fill
-        cell.font = header_font
-
-    metric_rows = [
+    # 4. Metric Summary Table
+    ws["A11"] = "Metric Summary"
+    ws["A11"].font = Font(size=13, bold=True, color="111827")
+    headers = ["METRIC", "SPEC MIN", "COUNT", "PASS", "FAIL", "MIN", "AVG", "MEDIAN", "MAX"]
+    for i, h in enumerate(headers, 1):
+        cell = ws.cell(row=12, column=i, value=h)
+        cell.fill = PatternFill("solid", fgColor="1F2937")
+        cell.font = Font(color="FFFFFF", bold=True)
+    
+    summary_rows = [
         ("Black Uniformity", BU_SPEC_MIN, bu_summary),
-        ("White Uniformity", WU_SPEC_MIN, wu_summary),
+        ("White Uniformity", WU_SPEC_MIN, wu_summary)
     ]
-    for row_idx, (label, spec_min, summary) in enumerate(metric_rows, start=10):
-        ws.cell(row=row_idx, column=1, value=label)
-        ws.cell(row=row_idx, column=2, value=spec_min)
-        ws.cell(row=row_idx, column=3, value=summary["count"])
-        ws.cell(row=row_idx, column=4, value=summary["pass_count"])
-        ws.cell(row=row_idx, column=5, value=summary["fail_count"])
-        ws.cell(row=row_idx, column=6, value=summary["min"])
-        ws.cell(row=row_idx, column=7, value=summary["avg"])
-        ws.cell(row=row_idx, column=8, value=summary["median"])
-        ws.cell(row=row_idx, column=9, value=summary["max"])
+    for r_idx, (label, spec, s) in enumerate(summary_rows, 13):
+        ws.cell(row=r_idx, column=1, value=label)
+        ws.cell(row=r_idx, column=2, value=spec)
+        ws.cell(row=r_idx, column=3, value=s["count"])
+        ws.cell(row=r_idx, column=4, value=s["pass_count"])
+        ws.cell(row=r_idx, column=5, value=s["fail_count"])
+        ws.cell(row=r_idx, column=6, value=s["min"])
+        ws.cell(row=r_idx, column=7, value=s["avg"])
+        ws.cell(row=r_idx, column=8, value=s["median"])
+        ws.cell(row=r_idx, column=9, value=s["max"])
 
-    # 정렬 추세 차트용 데이터
-    ws["K9"] = "BU_index"
-    ws["L9"] = "BU_value"
-    ws["M9"] = "BU_spec"
-    for idx, value in enumerate(bu_summary["sorted_values"], start=10):
-        ws.cell(row=idx, column=11, value=idx - 2)
-        ws.cell(row=idx, column=12, value=value)
-        ws.cell(row=idx, column=13, value=BU_SPEC_MIN)
+    # 5. Trend Charts (Current Session Distribution)
+    # [데이터 준비]
+    ws["K12"] = "BU_val"; ws["L12"] = "BU_spec"
+    for idx, v in enumerate(bu_summary["sorted_values"], 13):
+        ws.cell(row=idx, column=11, value=v); ws.cell(row=idx, column=12, value=BU_SPEC_MIN)
+    ws["N12"] = "WU_val"; ws["O12"] = "WU_spec"
+    for idx, v in enumerate(wu_summary["sorted_values"], 13):
+        ws.cell(row=idx, column=14, value=v); ws.cell(row=idx, column=15, value=WU_SPEC_MIN)
 
-    ws["O9"] = "WU_index"
-    ws["P9"] = "WU_value"
-    ws["Q9"] = "WU_spec"
-    for idx, value in enumerate(wu_summary["sorted_values"], start=10):
-        ws.cell(row=idx, column=15, value=idx - 2)
-        ws.cell(row=idx, column=16, value=value)
-        ws.cell(row=idx, column=17, value=WU_SPEC_MIN)
+    # BU Chart
+    bu_ch = LineChart(); bu_ch.title = "BU Distribution Trend"; bu_ch.y_axis.title = "Value"
+    bu_ch.add_data(Reference(ws, min_col=11, max_col=12, min_row=12, max_row=12+len(bu_vals)), titles_from_data=True)
+    style_line_chart(bu_ch, "DC2626", "94A3B8")
+    ws.add_chart(bu_ch, "A16")
 
-    bu_line = LineChart()
-    bu_line.title = "BU 분포 추세"
-    bu_line.y_axis.title = "Black Uniformity"
-    bu_line.x_axis.title = "정렬 순서"
-    bu_data = Reference(ws, min_col=12, max_col=13, min_row=9, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
-    bu_cats = Reference(ws, min_col=11, min_row=10, max_row=max(10, len(bu_summary["sorted_values"]) + 9))
-    bu_line.add_data(bu_data, titles_from_data=True)
-    bu_line.set_categories(bu_cats)
-    style_line_chart(bu_line, "DC2626", "94A3B8")
-    ws.add_chart(bu_line, "A14")
+    # WU Chart
+    wu_ch = LineChart(); wu_ch.title = "WU Distribution Trend"; wu_ch.y_axis.title = "Value"
+    wu_ch.add_data(Reference(ws, min_col=14, max_col=15, min_row=12, max_row=12+len(wu_vals)), titles_from_data=True)
+    style_line_chart(wu_ch, "16A34A", "94A3B8")
+    ws.add_chart(wu_ch, "G16")
 
-    wu_line = LineChart()
-    wu_line.title = "WU 분포 추세"
-    wu_line.y_axis.title = "White Uniformity"
-    wu_line.x_axis.title = "정렬 순서"
-    wu_data = Reference(ws, min_col=16, max_col=17, min_row=9, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
-    wu_cats = Reference(ws, min_col=15, min_row=10, max_row=max(10, len(wu_summary["sorted_values"]) + 9))
-    wu_line.add_data(wu_data, titles_from_data=True)
-    wu_line.set_categories(wu_cats)
-    style_line_chart(wu_line, "16A34A", "94A3B8")
-    ws.add_chart(wu_line, "N14")
+    # 6. Historical Trend Analysis (전용 차트)
+    if not history_df.empty:
+        ws["A30"] = "Historical Quality Trend (Last 15 Sessions)"
+        ws["A30"].font = Font(size=13, bold=True)
+        
+        # 히스토리 데이터 작성 (멀리 배치)
+        hr = 200
+        ws.cell(row=hr, column=1, value="Date")
+        ws.cell(row=hr, column=2, value="Pass_Rate")
+        ws.cell(row=hr, column=3, value="BU_Avg")
+        
+        hist_subset = history_df.tail(15)
+        for i, row in enumerate(hist_subset.itertuples(), 1):
+            ws.cell(row=hr+i, column=1, value=str(row.Date))
+            ws.cell(row=hr+i, column=2, value=row.Pass_Rate)
+            ws.cell(row=hr+i, column=3, value=row.BU_Avg)
+            
+        hist_ch = LineChart(); hist_ch.title = "Historical Pass Rate & BU Trend"
+        hist_ch.add_data(Reference(ws, min_col=2, max_col=3, min_row=hr, max_row=hr+len(hist_subset)), titles_from_data=True)
+        hist_ch.set_categories(Reference(ws, min_col=1, min_row=hr+1, max_row=hr+len(hist_subset)))
+        hist_ch.height = 8; hist_ch.width = 24
+        ws.add_chart(hist_ch, "A31")
 
-    # Pass/Fail 파이 차트
-    ws["A31"] = "Metric"
-    ws["B31"] = "Pass"
-    ws["C31"] = "Fail"
-    ws["A32"] = "BU"
-    ws["B32"] = bu_summary["pass_count"]
-    ws["C32"] = bu_summary["fail_count"]
-    ws["A33"] = "WU"
-    ws["B33"] = wu_summary["pass_count"]
-    ws["C33"] = wu_summary["fail_count"]
-
-    bu_pie = PieChart()
-    bu_pie.title = "BU Pass/Fail"
-    bu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=32, max_row=32), from_rows=True)
-    bu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
-    bu_pie.dataLabels = DataLabelList()
-    bu_pie.dataLabels.showPercent = True
-    bu_pie.dataLabels.showVal = True
-    style_pie_chart(bu_pie)
-    ws.add_chart(bu_pie, "A35")
-
-    wu_pie = PieChart()
-    wu_pie.title = "WU Pass/Fail"
-    wu_pie.add_data(Reference(ws, min_col=2, max_col=3, min_row=33, max_row=33), from_rows=True)
-    wu_pie.set_categories(Reference(ws, min_col=2, max_col=3, min_row=31, max_row=31))
-    wu_pie.dataLabels = DataLabelList()
-    wu_pie.dataLabels.showPercent = True
-    wu_pie.dataLabels.showVal = True
-    style_pie_chart(wu_pie)
-    ws.add_chart(wu_pie, "J35")
-
-    # Spec 기준 중심 버킷 분포
-    bu_bins = [
-        ("<40", 0, 40),
-        ("40-45", 40, 45),
-        ("45-50", 45, 50),
-        ("50-55", 50, 55),
-        ("55-60", 55, 60),
-        ("60+", 60, 9999),
-    ]
-    wu_bins = [
-        ("<70", 0, 70),
-        ("70-75", 70, 75),
-        ("75-80", 75, 80),
-        ("80-85", 80, 85),
-        ("85-90", 85, 90),
-        ("90+", 90, 9999),
-    ]
-    bu_distribution = build_distribution(bu_summary["sorted_values"], bu_bins)
-    wu_distribution = build_distribution(wu_summary["sorted_values"], wu_bins)
-
-    ws["S9"] = "BU_bucket"
-    ws["T9"] = "BU_count"
-    for idx, (label, count) in enumerate(bu_distribution, start=10):
-        ws.cell(row=idx, column=19, value=label)
-        ws.cell(row=idx, column=20, value=count)
-
-    ws["V9"] = "WU_bucket"
-    ws["W9"] = "WU_count"
-    for idx, (label, count) in enumerate(wu_distribution, start=10):
-        ws.cell(row=idx, column=22, value=label)
-        ws.cell(row=idx, column=23, value=count)
-
-    bu_bar = BarChart()
-    bu_bar.title = "BU 분포 구간"
-    bu_bar.y_axis.title = "Count"
-    bu_bar.x_axis.title = "Range"
-    bu_bar.add_data(Reference(ws, min_col=20, min_row=9, max_row=9 + len(bu_distribution)), titles_from_data=True)
-    bu_bar.set_categories(Reference(ws, min_col=19, min_row=10, max_row=9 + len(bu_distribution)))
-    style_bar_chart(bu_bar, "DC2626")
-    ws.add_chart(bu_bar, "T14")
-
-    wu_bar = BarChart()
-    wu_bar.title = "WU 분포 구간"
-    wu_bar.y_axis.title = "Count"
-    wu_bar.x_axis.title = "Range"
-    wu_bar.add_data(Reference(ws, min_col=23, min_row=9, max_row=9 + len(wu_distribution)), titles_from_data=True)
-    wu_bar.set_categories(Reference(ws, min_col=22, min_row=10, max_row=9 + len(wu_distribution)))
-    style_bar_chart(wu_bar, "16A34A")
-    ws.add_chart(wu_bar, "T35")
-
-    write_kpi_table(
-        ws,
-        31,
-        20,
-        "Worst BU LotID",
-        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "black_uniformity")],
-    )
-    write_kpi_table(
-        ws,
-        31,
-        23,
-        "Worst WU LotID",
-        [(lot_id, value) for lot_id, judge, value in pick_worst_lotids(latest_measurements, "white_uniformity")],
-    )
-
-    ws.column_dimensions["A"].width = 22
-    for col in ("B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "S", "T", "V", "W"):
+    # Finalize Column Widths
+    for col in ["A", "D", "G", "J"]:
         ws.column_dimensions[col].width = 12
+    ws.column_dimensions["A"].width = 24
 
 
 def collect_latest_lotid_folders(integrated_root: Path, cancel_check=None) -> tuple[dict[str, Path], list[dict]]:
@@ -1297,13 +1234,13 @@ def write_bu_analysis_excel(
     detail_ws["A2"] = "크롭 기준"
     detail_ws["B2"] = "검은색 제외 영역의 최소 사각형(BBox)을 찾은 뒤, 사용자 입력 padding을 더해 크롭"
     detail_ws["A3"] = "Grid 기준"
-    detail_ws["B3"] = f"크롭된 BU 이미지에서 HSV+Contour로 제품영역을 다시 잡은 뒤 {BU_GRID_COLS} x {BU_GRID_ROWS} 분할"
+    detail_ws["B3"] = f"이미 저장된 크롭 이미지(.png)에서 최적화된 제품 영역을 다시 잡은 뒤 {BU_GRID_COLS} x {BU_GRID_ROWS} 분할"
     detail_ws["A4"] = "편차 계산식"
     detail_ws["B4"] = "편차 = 전체평균밝기 - 셀평균밝기, 밝음=- / 어두움=+"
     detail_ws["A5"] = "비검정 기준"
     detail_ws["B5"] = f"밝기 > threshold({threshold}) 인 픽셀만 사용"
     detail_ws["A6"] = "Grid Data"
-    detail_ws["B6"] = "최적화된 제품영역 + 5px 내부 축소 영역"
+    detail_ws["B6"] = "최적화된 제품 영역(Refined) + 5px 내부 축소 영역"
     detail_ws["A7"] = "Worst Point 기준"
     detail_ws["B7"] = "빨강/흰색 성분 우선 + 제품 content 비율 기준"
 
@@ -1326,14 +1263,19 @@ def write_bu_analysis_excel(
         lot_id = rec["lot_id"]
         measurement = latest_measurements.get(lot_id, {})
         model_name = measurement.get("model_name", "")
-        refined_grid_bbox = get_refined_product_bbox(Path(rec["dst"]), margin_px=GRID_REFINED_MARGIN_PX)
+        
+        # 크롭된 이미지 파일(rec["dst"]) 경로
+        cropped_img_path = Path(rec["dst"])
+        
+        # [복원] 크롭된 이미지 내에서 다시 한번 실제 제품 영역(BBox)을 최적화해서 추출
+        refined_grid_bbox = get_refined_product_bbox(cropped_img_path, margin_px=GRID_REFINED_MARGIN_PX)
 
         analyses = {
             "trim5": analyze_bu_grid(
-                Path(rec["dst"]),
+                cropped_img_path,
                 threshold,
                 inner_trim=5,
-                crop_box=refined_grid_bbox,
+                crop_box=refined_grid_bbox, # 최적화된 영역 적용
                 analysis_label="Refined Product Area + Inner Trim 5px",
             ),
         }
@@ -1589,6 +1531,80 @@ def write_bu_analysis_excel(
     return analysis_count
 
 
+def crop_images_directly(latest_by_lotid: dict[str, Path], output_root: Path, threshold: int, padding: int, cancel_check=None):
+    # 중간 복사 과정 없이 원본에서 바로 최종 폴더로 크롭하여 저장
+    if output_root.exists():
+        try:
+            shutil.rmtree(output_root)
+        except Exception as e:
+            print(f"⚠️ 폴더 삭제 중 오류 (무시하고 계속): {e}")
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # 분석 대상 이미지 파일들 수집
+    image_files = []
+    for lot_id, src_folder in latest_by_lotid.items():
+        for f in src_folder.rglob("*"):
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+                image_files.append((lot_id, src_folder, f))
+
+    total_images = len(image_files)
+    print(f"\n[5/7] 이미지 크롭 시작 (대상: {total_images}개, 구조 단순화 적용)")
+
+    records = []
+    for idx, (lot_id, src_folder, src) in enumerate(image_files, start=1):
+        ensure_not_cancelled(cancel_check)
+        
+        # 파일명에서 종류(BU/WU) 추출
+        _, kind = parse_lot_kind(src.stem)
+        
+        # [수정] 결과 저장 시 원본 폴더 구조(left/right 등)를 무시하고 LotID 바로 밑에 저장
+        dst_folder = output_root / lot_id
+        dst_folder.mkdir(parents=True, exist_ok=True)
+        dst = dst_folder / src.name
+        dst = unique_file_path(dst)
+        renamed = dst.name != src.name
+
+        try:
+            with Image.open(src) as img:
+                bbox = find_non_black_bbox(img, threshold=threshold)
+                if bbox is None:
+                    # 객체 검출 실패 시 원본 그대로 저장
+                    status = "NO_OBJECT_DETECTED"
+                    img.save(dst)
+                    used_bbox = (0, 0, img.width, img.height)
+                else:
+                    used_bbox = add_padding(bbox, img.width, img.height, padding)
+                    cropped = img.crop(used_bbox)
+                    if dst.suffix.lower() in (".jpg", ".jpeg") and cropped.mode not in ("RGB", "L"):
+                        cropped = cropped.convert("RGB")
+                    cropped.save(dst)
+                    status = "OK"
+
+            records.append({
+                "lot_id": lot_id,
+                "kind": kind,
+                "src": src,
+                "dst": dst,
+                "bbox": used_bbox,
+                "status": status,
+                "renamed_on_save": "TRUE" if renamed else "FALSE",
+            })
+            if idx % 10 == 0 or idx == total_images:
+                print_progress("이미지 크롭", idx, total_images)
+        except Exception as exc:
+            print(f"❌ 크롭 오류 ({src.name}): {exc}")
+            records.append({
+                "lot_id": lot_id,
+                "kind": kind,
+                "src": src,
+                "dst": None,
+                "bbox": None,
+                "status": f"ERROR: {exc}",
+                "renamed_on_save": "FALSE",
+            })
+    return records
+
+
 def crop_images(input_root: Path, output_root: Path, threshold: int, padding: int, cancel_check=None):
     # merge 결과 폴더를 대상으로 자동 크롭 실행
     if output_root.exists():
@@ -1811,10 +1827,61 @@ def write_excel(
     detail_ws.column_dimensions["F"].width = 60
     detail_ws.column_dimensions["G"].width = 60
     detail_ws.column_dimensions["H"].width = 44
-    add_visualization_sheet(wb, latest_measurements or {})
+    add_visualization_sheet(wb, latest_measurements or {}, excel_path)
     print("\n메인 엑셀 저장")
     wb.save(excel_path)
     print("  메인 엑셀 저장 완료")
+
+
+def write_data_only_excel(latest_measurements: dict[str, dict], output_path: Path):
+    # 이미지가 없는 데이터 전용 엑셀 파일 생성 (v1 스타일 요청 반영)
+    wb = Workbook()
+    
+    # 1) 전체 시트 (Total)
+    ws_total = wb.active
+    ws_total.title = "Total"
+    headers = ["LotID", "ModelName", "Judge", "Black_Uniformity", "White_Uniformity", "Time"]
+    ws_total.append(headers)
+    
+    # 2) BU_Data 시트
+    ws_bu = wb.create_sheet("BU_Data")
+    ws_bu.append(["LotID", "ModelName", "Judge", "Black_Uniformity", "Time"])
+    
+    # 3) WU_Data 시트
+    ws_wu = wb.create_sheet("WU_Data")
+    ws_wu.append(["LotID", "ModelName", "Judge", "White_Uniformity", "Time"])
+    
+    for lot_id in sorted(latest_measurements.keys()):
+        m = latest_measurements[lot_id]
+        row_total = [
+            lot_id, 
+            m.get("model_name", ""), 
+            m.get("judge", ""), 
+            m.get("black_uniformity", ""), 
+            m.get("white_uniformity", ""),
+            m.get("time_raw", "")
+        ]
+        ws_total.append(row_total)
+        
+        # BU 데이터가 있는 경우
+        if m.get("black_uniformity") not in (None, ""):
+            ws_bu.append([lot_id, m.get("model_name", ""), m.get("judge", ""), m.get("black_uniformity"), m.get("time_raw", "")])
+            
+        # WU 데이터가 있는 경우
+        if m.get("white_uniformity") not in (None, ""):
+            ws_wu.append([lot_id, m.get("model_name", ""), m.get("judge", ""), m.get("white_uniformity"), m.get("time_raw", "")])
+
+    # 시트별 너비 조정
+    for sheet in wb.worksheets:
+        sheet.column_dimensions["A"].width = 25
+        sheet.column_dimensions["B"].width = 20
+        sheet.column_dimensions["C"].width = 10
+        sheet.column_dimensions["D"].width = 15
+        sheet.column_dimensions["E"].width = 15
+        sheet.column_dimensions["F"].width = 20
+
+    print(f"\n데이터 전용 엑셀 저장: {output_path.name}")
+    wb.save(output_path)
 
 
 def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding: int, cancel_check=None) -> dict:
@@ -1823,6 +1890,8 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
     cropped_root = integrated_root.parent / f"{integrated_root.name}_LotID_latest_v1_cropped_v1"
     excel_path = cropped_root / "crop_report.xlsx"
     bu_analysis_excel_path = cropped_root / "bu_grid_analysis.xlsx"
+    # [추가] 데이터 전용 엑셀 경로
+    data_only_excel_path = cropped_root / "BU_WU_Data_정리본_NoImage.xlsx"
 
     print(f"\n📌 원본 통합 폴더: {integrated_root}")
     print(f"📌 측정 데이터 폴더: {data_root}")
@@ -1838,11 +1907,19 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
         print("⚠️ LotID 폴더를 찾지 못했어. 폴더 구조를 확인해줘.")
         return
 
-    copy_latest_folders(latest_by_lotid, merged_root, cancel_check=cancel_check)
-    merge_report_path = write_merge_report(merge_rows, merged_root)
+    # [수정] 중간 단계인 merged_root로의 전체 복사 과정을 생략합니다.
+    # 대신 최신 폴더 정보를 기반으로 원본에서 직접 크롭을 수행합니다.
+    # copy_latest_folders(latest_by_lotid, merged_root, cancel_check=cancel_check)
+    
+    # 크롭 리포트와 분석 엑셀이 저장될 폴더 생성
+    cropped_root.mkdir(parents=True, exist_ok=True)
+    merge_report_path = write_merge_report(merge_rows, cropped_root) # 리포트는 최종 폴더에 저장
 
     latest_measurements, measurement_rows = collect_latest_measurements(data_root, cancel_check=cancel_check)
-    crop_records = crop_images(merged_root, cropped_root, threshold, padding, cancel_check=cancel_check)
+    
+    # [수정] merged_root 대신 latest_by_lotid 정보를 직접 전달하여 원본에서 크롭하도록 변경이 필요함
+    # 우선은 기존 구조를 유지하되, crop_images 함수가 원본 경로를 참조하도록 수정합니다.
+    crop_records = crop_images_directly(latest_by_lotid, cropped_root, threshold, padding, cancel_check=cancel_check)
     write_excel(
         crop_records,
         excel_path,
@@ -1858,6 +1935,9 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
         threshold,
         cancel_check=cancel_check,
     )
+
+    # [추가] 데이터 전용 엑셀 저장 호출
+    write_data_only_excel(latest_measurements, data_only_excel_path)
 
     duplicate_count = len(merge_rows) - len(latest_by_lotid)
     ok_count = sum(1 for r in crop_records if r["status"] == "OK")
@@ -1876,6 +1956,7 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
     print(f"Merge 리포트: {merge_report_path}")
     print(f"Crop 엑셀: {excel_path}")
     print(f"BU 분석 엑셀: {bu_analysis_excel_path}")
+    print(f"데이터 전용 엑셀: {data_only_excel_path}")
     print(f"BU 분석 완료 LotID 수: {bu_analysis_count}")
     print("완료!")
 
@@ -1884,6 +1965,7 @@ def run_pipeline(integrated_root: Path, data_root: Path, threshold: int, padding
         "cropped_root": cropped_root,
         "excel_path": excel_path,
         "bu_analysis_excel_path": bu_analysis_excel_path,
+        "data_only_excel_path": data_only_excel_path,
         "merge_report_path": merge_report_path,
         "merge_rows": len(merge_rows),
         "latest_lotids": len(latest_by_lotid),
